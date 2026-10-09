@@ -18,7 +18,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!workspace?.hostId) return res.status(404).json({ error: 'Remote workspace not found' });
   const layout = await readLayoutFile(resolveLayoutFile(workspaceId));
   const tab = layout ? collectAllTabs(layout.root).find((t) => t.sessionName === sessionName) : null;
-  if (!tab || (tab.panelType !== 'codex-cli' && tab.remoteAgent !== 'codex')) {
+  if (!tab || tab.panelType !== 'codex-cli') {
     return res.status(404).json({ error: 'Remote Codex tab not found' });
   }
 
