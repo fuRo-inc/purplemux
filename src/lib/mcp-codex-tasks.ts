@@ -129,9 +129,9 @@ const markFinal = async (record: TaskRecord, status: TaskStatus, state?: CodexGu
 };
 const itemsFor = (record: TaskRecord, state: CodexGuiState) => {
   const i = state.items.findIndex((item) => item.id === record.userItemId);
-  // When xterm's bounded history drops the original message, show only a
-  // bounded recent tail, never claim it contains the complete transcript.
-  return i < 0 ? state.items.slice(-24) : state.items.slice(i + 1);
+  // Never include earlier-thread or unrelated output when the task's user
+  // message is no longer in the bounded App Server UI history.
+  return i < 0 ? [] : state.items.slice(i + 1);
 };
 const refresh = async (record: TaskRecord) => {
   if (isFinal(record.status)) return;
