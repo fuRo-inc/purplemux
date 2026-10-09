@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+afterEach(() => vi.unstubAllEnvs());
 
 // The protocol tests never read a user's workspaces or start Codex.
 vi.mock('@/lib/mcp-bridge-data', () => ({
@@ -6,6 +8,14 @@ vi.mock('@/lib/mcp-bridge-data', () => ({
   listBridgeWorkspaces: vi.fn(async () => ({ workspaces: [], activeWorkspaceId: null })),
   listBridgeCodexTabs: vi.fn(async () => ({ tabs: [], truncated: false })),
   getBridgeCodexStatus: vi.fn(async () => ({ status: 'not_loaded' })),
+}));
+
+vi.mock('@/lib/mcp-internal-client', () => ({
+  callMcpRuntime: vi.fn(async (operation: string) => {
+    if (operation === 'start_codex_task') return { taskId: 'abcd1234', status: 'queued' };
+    if (operation === 'get_codex_task') return { taskId: 'abcd1234', status: 'completed' };
+    return { tabs: [] };
+  }),
 }));
 
 import { dispatchMcpRequest } from '@/lib/mcp-bridge';
@@ -39,6 +49,7 @@ describe('Purplemux read-only MCP bridge', () => {
     const result = response?.result as { tools: { name: string; annotations: { readOnlyHint: boolean } }[] };
     expect(result.tools.map((tool) => tool.name)).toEqual([
       'list_hosts', 'list_workspaces', 'list_codex_tabs', 'get_codex_status',
+      'get_codex_task', 'list_codex_tasks',
     ]);
     expect(result.tools.every((tool) => tool.annotations.readOnlyHint)).toBe(true);
     expect(result.tools.some((tool) => tool.name.includes('send') || tool.name.includes('exec'))).toBe(false);
@@ -85,6 +96,37 @@ describe('Purplemux read-only MCP bridge', () => {
       params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-11-25' } },
     }, '2026-07-28');
     expect(response?.error?.code).toBe(-32600);
+  });
+
+  it('advertises mutation tools only when explicitly enabled', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    const response = await dispatchMcpRequest({ jsonrpc: '2.0', id: 31, method: 'tools/list' });
+    const result = response?.result as { tools: { name: string; annotations: { readOnlyHint: boolean } }[] };
+    expect(result.tools.slice(-3).map((tool) => tool.name)).toEqual([
+      'start_codex_task', 'interrupt_codex_task', 'respond_codex_approval',
+    ]);
+    expect(result.tools.slice(-3).every((tool) => !tool.annotations.readOnlyHint)).toBe(true);
+  });
+
+  it('rejects mutation attempts even when an unlisted tool is invoked', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '0');
+    const result = await dispatchMcpRequest({
+      jsonrpc: '2.0', id: 32, method: 'tools/call',
+      params: { name: 'start_codex_task', arguments: { workspaceId: 'test' } },
+    });
+    expect(result?.error?.code).toBe(-32602);
+  });
+
+  it('routes explicitly enabled writes to the private runtime, not through shell', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    const result = await dispatchMcpRequest({
+      jsonrpc: '2.0', id: 33, method: 'tools/call',
+      params: { name: 'start_codex_task', arguments: { workspaceId: 'ws-test' } },
+    });
+    expect(result?.result).toMatchObject({
+      structuredContent: { taskId: 'abcd1234', status: 'queued' },
+      isError: false,
+    });
   });
 
   it('does not respond to client notifications', async () => {
