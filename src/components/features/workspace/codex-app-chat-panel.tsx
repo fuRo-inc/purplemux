@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, CircleStop, FileDiff, History, LoaderCircle, MessageSquare, Plus, SendHorizontal, Terminal, X } from 'lucide-react';
+import { Check, CircleStop, FileDiff, History, LoaderCircle, MessageSquare, Plus, SendHorizontal, ShieldCheck, Terminal, X, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import AssistantMessageItem from '@/components/features/timeline/assistant-message-item';
 import UserMessageItem from '@/components/features/timeline/user-message-item';
-import type { CodexGuiState, CodexGuiItem } from '@/lib/codex-app-gui';
+import type { CodexGuiState, CodexGuiItem, CodexGuiSandbox, CodexGuiApprovalPolicy } from '@/lib/codex-app-gui';
 import CodexSessionPicker from '@/components/features/workspace/codex-session-picker';
 
 interface ICodexAppChatPanelProps {
@@ -14,7 +14,8 @@ interface ICodexAppChatPanelProps {
 
 const DEFAULT_STATE: CodexGuiState = {
   ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
-  model: null, effort: null, models: [], items: [], approvals: [], error: null,
+  model: null, effort: null, sandboxMode: 'workspace-write', approvalPolicy: 'on-request',
+  fastMode: false, models: [], items: [], approvals: [], error: null,
 };
 
 export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }: ICodexAppChatPanelProps) {
@@ -23,6 +24,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
   const [draft, setDraft] = useState('');
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [settingBusy, setSettingBusy] = useState(false);
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
   const [actionError, setActionError] = useState('');
@@ -63,6 +65,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
 
   const model = useMemo(() => state.models.find((m) => m.model === selectedModel), [state.models, selectedModel]);
   const effortOptions = model?.supportedReasoningEfforts ?? [];
+  const fastAvailable = model?.serviceTiers?.some((tier) => tier.id === 'fast') ?? false;
   const isNearBottomRef = useRef(true);
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
@@ -90,18 +93,46 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
     return body;
   }, [workspaceId, tabId]);
 
+  const saveSettings = async (changes: Record<string, unknown>) => {
+    if (settingBusy || state.busy) return;
+    setSettingBusy(true);
+    try {
+      await request('settings', changes);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '設定の変更に失敗しました');
+      throw error;
+    } finally {
+      setSettingBusy(false);
+    }
+  };
+
   const changeModel = (next: string) => {
-    const model = state.models.find((m) => m.model === next);
-    if (!model) return;
+    const nextModel = state.models.find((entry) => entry.model === next);
+    if (!nextModel) return;
+    const previousModel = selectedModel;
+    const previousEffort = selectedEffort;
     setSelectedModel(next);
-    setSelectedEffort(model.defaultReasoningEffort);
-    void request('settings', { model: next, effort: model.defaultReasoningEffort })
-      .catch((error: Error) => setActionError(error.message));
+    setSelectedEffort(nextModel.defaultReasoningEffort);
+    void saveSettings({ model: next, effort: nextModel.defaultReasoningEffort }).catch(() => {
+      setSelectedModel(previousModel);
+      setSelectedEffort(previousEffort);
+    });
   };
   const changeEffort = (next: string) => {
+    const previous = selectedEffort;
     setSelectedEffort(next);
-    void request('settings', { effort: next })
-      .catch((error: Error) => setActionError(error.message));
+    void saveSettings({ effort: next }).catch(() => setSelectedEffort(previous));
+  };
+  const changeSandbox = (next: CodexGuiSandbox) => {
+    if (next === 'danger-full-access' && state.sandboxMode !== next &&
+        !window.confirm('Full AccessではSandboxの制限がなくなり、ホスト内のファイルやコマンドへのアクセスが広がります。有効にしますか？')) return;
+    void saveSettings({ sandboxMode: next }).catch(() => {});
+  };
+  const changeApproval = (next: CodexGuiApprovalPolicy) => {
+    void saveSettings({ approvalPolicy: next }).catch(() => {});
+  };
+  const changeFast = (checked: boolean) => {
+    void saveSettings({ fastMode: checked }).catch(() => {});
   };
 
   const send = async () => {
@@ -198,7 +229,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 min-w-0 max-w-56 flex-1 rounded-md border bg-background px-2 text-xs"
             value={selectedModel}
             onChange={(event) => changeModel(event.target.value)}
-            disabled={!connected || state.models.length === 0 || state.busy}
+            disabled={!connected || state.models.length === 0 || state.busy || settingBusy}
           >
             {state.models.length === 0 && <option value="">取得中…</option>}
             {state.models.map((option) => (
@@ -213,7 +244,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 max-w-32 rounded-md border bg-background px-2 text-xs"
             value={selectedEffort}
             onChange={(event) => changeEffort(event.target.value)}
-            disabled={!connected || effortOptions.length === 0 || state.busy}
+            disabled={!connected || effortOptions.length === 0 || state.busy || settingBusy}
           >
             {effortOptions.length === 0 && <option value="">Default</option>}
             {effortOptions.map((option) => (
@@ -221,7 +252,57 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             ))}
           </select>
         </label>
+        <label className="flex min-w-0 items-center gap-2 text-xs">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="shrink-0 text-muted-foreground">Permissions</span>
+          <select
+            aria-label="Codex Sandbox権限"
+            className="h-8 max-w-44 rounded-md border bg-background px-2 text-xs"
+            value={state.sandboxMode}
+            onChange={(event) => changeSandbox(event.target.value as CodexGuiSandbox)}
+            disabled={!connected || state.busy || settingBusy}
+          >
+            <option value="read-only">Read only</option>
+            <option value="workspace-write">Workspace write</option>
+            <option value="danger-full-access">Full access</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Approval</span>
+          <select
+            aria-label="Codex承認方法"
+            className="h-8 max-w-36 rounded-md border bg-background px-2 text-xs"
+            value={state.approvalPolicy}
+            onChange={(event) => changeApproval(event.target.value as CodexGuiApprovalPolicy)}
+            disabled={!connected || state.busy || settingBusy}
+            title="Neverでは許可要求を表示せず、許可が必要な操作を拒否します"
+          >
+            <option value="on-request">Ask when needed</option>
+            <option value="never">Never (deny)</option>
+          </select>
+        </label>
+        <label
+          className="flex cursor-pointer items-center gap-1.5 text-xs"
+          title={fastAvailable ? 'Fastサービス層を使用（通常はOFF）' : '現在のモデル・HostではFastが利用できません'}
+        >
+          <Zap className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-muted-foreground">Fast</span>
+          <input
+            type="checkbox"
+            aria-label="Codex Fastモード"
+            className="h-4 w-4 accent-foreground"
+            checked={fastAvailable && state.fastMode}
+            disabled={!fastAvailable || !connected || state.busy || settingBusy}
+            onChange={(event) => changeFast(event.target.checked)}
+          />
+          <span className="text-[11px] text-muted-foreground">{fastAvailable && state.fastMode ? 'ON' : 'OFF'}</span>
+        </label>
       </div>
+      {state.sandboxMode === 'danger-full-access' && (
+        <p className="shrink-0 border-b px-3 pb-2 text-xs text-amber-400">
+          Full Access：選択したHostのSandbox制限が解除されています。
+        </p>
+      )}
 
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-5" style={{ overscrollBehavior: 'contain' }}>
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
