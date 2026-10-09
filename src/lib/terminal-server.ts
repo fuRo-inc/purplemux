@@ -25,6 +25,13 @@ const MSG_WEB_STDIN = 0x05;
 const MAX_CONNECTIONS = 32;
 const HEARTBEAT_INTERVAL = 30_000;
 const HEARTBEAT_TIMEOUT = 90_000;
+// Rate-limit rendered stdout independently of ws.bufferedAmount. The browser can
+// process WS messages much slower than the network can deliver them.
+const OUTPUT_WINDOW_MS = 1000;
+const MAX_OUTPUT_BYTES_PER_WINDOW = 128 * 1024;
+const MAX_THROTTLE_BUFFER_CHARS = 128 * 1024;
+const OUTPUT_SKIPPED_NOTICE = '\\r\\n[Purplemux] High-volume terminal output was truncated. Use less/tail for large files.\\r\\n';
+
 const BACKPRESSURE_HIGH = 1024 * 1024;
 const BACKPRESSURE_LOW = 256 * 1024;
 const THROTTLE_WINDOW_MS = 500;
@@ -411,8 +418,37 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
 
   const ptyPid = ptyProcess.pid;
 
+  let outputWindowStart = Date.now();
+  let outputWindowBytes = 0;
+  let outputDropped = false;
+
   const sendStdout = (data: string) => {
-    ws.send(encodeStdout(data));
+    const now = Date.now();
+    if (now - outputWindowStart >= OUTPUT_WINDOW_MS) {
+      outputWindowStart = now;
+      outputWindowBytes = 0;
+      outputDropped = false;
+    }
+    const remaining = MAX_OUTPUT_BYTES_PER_WINDOW - outputWindowBytes;
+    if (remaining <= 0) {
+      if (!outputDropped) {
+        outputDropped = true;
+        ws.send(encodeStdout(OUTPUT_SKIPPED_NOTICE));
+      }
+      return;
+    }
+    // UTF-8 can consume up to four bytes per JS code unit; conservatively
+    // cap by characters before encoding to avoid allocating huge WS frames.
+    const slice = data.length > remaining / 4
+      ? data.slice(0, Math.floor(remaining / 4))
+      : data;
+    const payload = encodeStdout(slice);
+    outputWindowBytes += payload.byteLength;
+    ws.send(payload);
+    if (slice.length !== data.length && !outputDropped) {
+      outputDropped = true;
+      ws.send(encodeStdout(OUTPUT_SKIPPED_NOTICE));
+    }
 
     if (ws.bufferedAmount > BACKPRESSURE_HIGH && !conn.backpressurePaused) {
       conn.backpressurePaused = true;
@@ -459,7 +495,12 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
       if (conn.capturePaused) return;
 
       if (Date.now() < conn.throttleUntil) {
-        conn.throttleBuffer += data;
+        // Avoid accumulating arbitrary amounts of output during resize/attach.
+        if (conn.throttleBuffer.length + data.length > MAX_THROTTLE_BUFFER_CHARS) {
+          conn.throttleBuffer = OUTPUT_SKIPPED_NOTICE + data.slice(-8192);
+        } else {
+          conn.throttleBuffer += data;
+        }
         return;
       }
       sendStdout(data);
