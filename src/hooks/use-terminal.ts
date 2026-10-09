@@ -244,24 +244,16 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
 
       terminal.open(containerNode);
 
-      // Block right-click before xterm converts it into a tmux mouse event.
-      // Suppressing only 'contextmenu' is too late: tmux already received MouseDown3.
-      const suppressRightMouse = (event: MouseEvent) => {
-        if (event.button !== 2) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+      // Keep the browser's native context menu, but do not forward right-click
+      // mouse events to xterm/tmux (which would open tmux's own menu).
+      const stopRightMouseForTerminal = (event: MouseEvent) => {
+        if (event.button === 2) event.stopImmediatePropagation();
       };
-      const suppressBrowserContextMenu = (event: MouseEvent) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      };
-      containerNode.addEventListener('mousedown', suppressRightMouse, true);
-      containerNode.addEventListener('mouseup', suppressRightMouse, true);
-      containerNode.addEventListener('contextmenu', suppressBrowserContextMenu, true);
+      containerNode.addEventListener('mousedown', stopRightMouseForTerminal, true);
+      containerNode.addEventListener('mouseup', stopRightMouseForTerminal, true);
       cleanupContextMenu = () => {
-        containerNode.removeEventListener('mousedown', suppressRightMouse, true);
-        containerNode.removeEventListener('mouseup', suppressRightMouse, true);
-        containerNode.removeEventListener('contextmenu', suppressBrowserContextMenu, true);
+        containerNode.removeEventListener('mousedown', stopRightMouseForTerminal, true);
+        containerNode.removeEventListener('mouseup', stopRightMouseForTerminal, true);
       };
 
       terminalInstance.current = terminal;
