@@ -11,7 +11,7 @@ import {
  * random per-startup bearer secret. The public 8022 production proxy denies
  * this route completely; Next proxy and the route itself enforce the secret.
  */
-export const config = { api: { bodyParser: { sizeLimit: '24kb' }, responseLimit: '128kb' } };
+export const config = { api: { bodyParser: { sizeLimit: '128kb' }, responseLimit: '128kb' } };
 
 const validToken = (received: unknown, expected: string | undefined): boolean => {
   if (!expected || typeof received !== 'string' || received.length !== expected.length) return false;
