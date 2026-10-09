@@ -594,7 +594,8 @@ export class CodexGuiRuntime {
       this.publish();
       try {
         if (!this.state.threadId) {
-          const cwd = this.workspace.hostId ? this.workspace.remoteDirectory : this.tab.cwd || this.workspace.directories[0];
+          const cwd = this.getWorkspaceCwd();
+          if (!cwd.startsWith('/')) throw new Error('Codex workspace directory must be absolute');
           const result = await this.request('thread/start', {
             cwd, approvalPolicy: 'on-request', sandbox: 'workspace-write',
             ...(this.state.model ? { model: this.state.model } : {}),
