@@ -300,7 +300,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
                 : resumedModel.defaultReasoningEffort,
             );
           }
-          setDraft('');
+          // Keep any unsent draft; the user may want to continue with it.
           isNearBottomRef.current = true;
         }}
       />
