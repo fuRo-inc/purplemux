@@ -9,8 +9,9 @@ Phase 1の読み取り専用Bridgeを拡張し、ChatGPTから既存のCodex Cha
 - **ブラウザとMCPは同一のCodex App Server runtimeを使用する。** `src/pages/api/mcp-internal.ts` を介し、ブラウザを提供するNext.jsプロセスの既存タブにアクセスする。Next standaloneの別プロセスにも対応。
 - 内部APIはNUCループバックと起動ごとに生成するトークンで認証し、外側のブラウザ用8022番ではルーティングしない。通常のWebセッションCookie・CLI汎用トークンから内部APIを利用できない。
 - MCP自体のアクセス経路は既存の `127.0.0.1:18223/mcp` かつ独立した0600トークンのstdio Bridgeのみ。
-- タスク送信には **Workspace ID・CodexタブID・Host ID・作業ディレクトリ・明示的な確認**がすべて必要。Hostまたはcwdが変わったら送信拒否。
-- CodexのSandboxは `workspace-write`、承認方式は `on-request` に強制する。既存のGUIがFull AccessだったとしてもMCP送信前に安全な設定へ変更。
+- タスク送信には **Workspace ID・CodexタブID・Host ID・作業ディレクトリ・明示的な確認**がすべて必要。Hostまたはcwdが変わったら送信拒否。既存thread継続時はCodex App Serverが保持する**実際のcwd**も照合する。
+- CodexのSandboxは**初期値 `read-only`**、承認方式は `on-request` に強制する。ファイル変更が必要な場合だけ `sandboxMode: workspace-write` と `confirmWriteAccess: true` の両方を明示する。`danger-full-access` はMCPから選択不可。
+- 内部MCP認証トークン、Web UI認証秘密情報、Tunnel APIキーはCodex子プロセスに引き継がない。
 - 実際のファイル変更・シェルコマンドはCodex App Serverの実行機能に依存。MCP自体に任意のシェルツールは置かない。承認要求は自動許可しない。
 - ChatGPTのMCPツールには `readOnlyHint`／`destructiveHint` を適切に付与。書き込み系の操作はChatGPT画面で内容を確認して許可する。
 - タスク記録は `~/.purplemux/mcp-tasks/<taskId>.json` に0600権限で保存。実際のprompt全文は保存せず、短い冒頭文とSHA256を保存する。結果要約・変更ファイル・差分冒頭（最大32KB）・承認の時刻とコマンドハッシュを記録。
@@ -24,7 +25,7 @@ Phase 1の読み取り専用Bridgeを拡張し、ChatGPTから既存のCodex Cha
 | `get_codex_status` | 読み取り | Codexタブの実行状況 |
 | `list_codex_tasks` | 読み取り | MCPから起動したタスクの一覧 |
 | `get_codex_task` | 読み取り | 状態・結果・差分・承認待ちを取得 |
-| `start_codex_task` | **明示有効化** | 既存Codex Chatで作業を開始 |
+| `start_codex_task` | **明示有効化** | 既存Codex Chatで作業を開始。初期値はRead only。Workspace writeには追加の明示確認が必要 |
 | `interrupt_codex_task` | **明示有効化** | 対象タスクの実行中のturnのみを中断 |
 | `respond_codex_approval` | **明示有効化** | 正確なrequestIdとコマンドを再検証し承認／拒否 |
 
@@ -60,7 +61,7 @@ PURPLEMUX_MCP_ENABLED=1 PURPLEMUX_MCP_ALLOW_WRITES=1 pnpm dev
 
 1. 「PurplemuxのWorkspaceとCodex Chatを列挙して」と依頼し、実行先のHost ID、Workspace ID、タブID、実際のcwdを確認。
 2. 変更しても問題ない開発／シミュレーションのWorkspaceで「このタブの現在の状態を確認」と依頼。
-3. 操作ツール有効化後、最初は「作業ディレクトリとGit状態を調べ、ファイルの変更はしない」という**読み取りのみの指示**をCodexへ出す。MCP自身のツールは変更可能なため、送信先と権限を画面で確認する。
+3. 操作ツール有効化後、最初は「作業ディレクトリとGit状態を調べ、ファイルの変更はしない」という**読み取りのみの指示**をCodexへ出す。`sandboxMode: read-only`（初期値）を使用する。MCP自身には変更可能な操作があるため、送信先と権限を画面で確認する。
 4. `start_codex_task` が返した `taskId` を使い、`get_codex_task` で進行状況を確認する。結果本文は `includeOutput:true`、差分は `includeDiff:true` で明示的に要求する。
 5. 実行中に承認が必要になったら `get_codex_task(includeOutput=true)` で requestId / command を確認し、人間が判断した後だけ `respond_codex_approval` で応答する。人間の指示のない承認を自動で行わない。
 6. キャンセルは `interrupt_codex_task`。完了したかは `get_codex_task` で再確認する。
@@ -80,9 +81,33 @@ Codexの `turn/diff/updated` が提供する差分のみ保存する。差分が
 ## 既知の制約とフォローアップ
 
 - 初期版では**既存のCodex Chatタブのみ**が対象。旧Codex TUIやタブ自体の新規作成は対象外。
-- `mode:new` は既存タブを新しいthreadへ切り替えるため、明示的に新規threadを要求した場合のみ使う。既定は既存threadの継続。
+- `mode:new` は既存タブを新しいthreadへ切り替えるため、明示的に新規threadを要求した場合のみ使う。既定は既存threadの継続。新規threadの作成時、元のthreadの権限設定は変更しない。
 - 異なるHostから別プロセスが同じタブを実行するような構成は未サポート。通常のブラウザUIとMCPが一つのNext runtimeを共有することが前提。
 - すでに実行中のGUI作業に対してタスク送信は拒否する。既存のGUIから設定を変える操作との完全な競合制御は今後の強化対象。
 - ChatGPT側は自動プッシュ通知ではなく、必要なタイミングで `get_codex_task` を呼び直す。
 - `unknown` になった古いタスクの再関連付けや永続的なジョブキューは未対応。
 - NUC／GMKtec実機での実行とTypeScript検査はまだ行っていない。まずコード検証→NUC型チェック→シミュレーションWorkspaceで非変更タスクの順に検証する。
+
+## ChatGPTからの呼び出し例（タスク送信が有効な場合）
+
+まず `list_codex_tabs` でタブのWorkspace／Host／directoryを確認した後、以下の引数を指定する。
+
+```json
+{
+  "workspaceId": "<Workspace ID>",
+  "tabId": "<Codex ChatタブID>",
+  "expectedHostId": "<list_codex_tabsにあるHost ID>",
+  "expectedDirectory": "<list_codex_tabsにある絶対パス>",
+  "instruction": "現在のGit状態とREADMEを確認し、編集せず報告してください。",
+  "mode": "continue",
+  "sandboxMode": "read-only",
+  "confirmTarget": true,
+  "idempotencyKey": "status-check-20261009-01"
+}
+```
+
+ファイル変更が必要な依頼では、ユーザーの了承を得た上で `sandboxMode: "workspace-write"` と `confirmWriteAccess: true` を指定する。この確認は**特定のタスクに対してのみ**使い回さない。MCP側からフルアクセスは指定できない。
+
+書き込みツールの有効化は **ChatGPT側のアプリを再検出することと別の操作**。まずNUC側で `PURPLEMUX_MCP_ALLOW_WRITES=1` を明示的に有効化してから、ChatGPT側でツールを再検出・許可する。既存セッションの `threadId` は`get_codex_task` の `threadId` でも取得できる。
+
+注意：`confirmTarget` はユーザーの意思確認を代行するものではなく、実行対象を再確認したというツール呼び出し時の宣言である。ユーザーに無断で工作・編集タスクを送らないこと。
