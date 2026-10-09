@@ -16,6 +16,7 @@ import { getStatusManager } from './src/lib/status-manager';
 import { ensureHookSettings, removePortFile } from './src/lib/hook-settings';
 import { enqueueSystemToast } from './src/lib/sync-server';
 import { getCliToken } from './src/lib/cli-token';
+import { startMcpBridge } from './src/lib/mcp-bridge';
 import { acquireLock, releaseLock, registerLockCleanup } from './src/lib/lock';
 import { scanSessions, applyConfig } from './src/lib/tmux';
 import { initWorkspaceStore, getWorkspaces, writeAllWorkspacePrompts } from './src/lib/workspace-store';
@@ -381,6 +382,23 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
   const result = dev
     ? await startDev(port, appDir, bindPlan.host)
     : await startProd(port, appDir, bindPlan.host);
+
+  if (process.env.PURPLEMUX_MCP_ENABLED === '1') {
+    try {
+      // Separate loopback-only listener, never routed through the browser UI.
+      // Secure MCP Tunnel uses the authenticated stdio proxy to reach it.
+      const bridge = await startMcpBridge();
+      const originalShutdown = result.shutdown;
+      result.shutdown = async () => {
+        await bridge.shutdown();
+        await originalShutdown();
+      };
+      log.info(`Read-only MCP bridge enabled on 127.0.0.1:${bridge.port}`);
+    } catch (error) {
+      await result.shutdown();
+      throw error;
+    }
+  }
 
   process.env.PORT = String(result.port);
 
