@@ -6,7 +6,6 @@ import OpenAIIcon from '@/components/icons/openai-icon';
 import TabStatusIndicator from '@/components/features/workspace/tab-status-indicator';
 import CopyPaneDrawer from '@/components/features/workspace/copy-pane-drawer';
 import useTabStore from '@/hooks/use-tab-store';
-import useWorkspaceStore from '@/hooks/use-workspace-store';
 import ProcessIcon from '@/components/icons/process-icon';
 import { cn } from '@/lib/utils';
 import useGitStatusStore, {
@@ -99,7 +98,6 @@ const MobileTabHeader = ({
   const [modeDrawerOpen, setModeDrawerOpen] = useState(false);
   const showCopy = panelType === 'terminal' && !!sessionName;
   const tabEntry = useTabStore((s) => s.tabs[tabId]);
-  const isRemoteWorkspace = useWorkspaceStore((s) => s.workspaces.some((w) => !!w.hostId && s.activeWorkspaceId === w.id));
   const gitPhase = useGitStatusStore((state) => state.phase);
   const gitStatus = useGitStatusStore((state) => state.status);
   const gitBranch = useGitStatusStore((state) => state.branch);
@@ -130,10 +128,7 @@ const MobileTabHeader = ({
     : hasDetectedAgent
       ? runtimeAgentPanelType
       : undefined;
-  const modeButtons: TModeButton[] = isRemoteWorkspace ? [
-    { type: 'terminal', label: 'Terminal' },
-    { type: 'codex-cli', label: 'Chat' },
-  ] : [
+  const modeButtons: TModeButton[] = [
     { type: 'terminal', label: 'Terminal' },
     ...(visibleAgentPanelType
       ? [{
@@ -174,7 +169,7 @@ const MobileTabHeader = ({
       setModeDrawerOpen(false);
       return;
     }
-    if (!isRemoteWorkspace && !tryAgentSwitch({
+    if (!tryAgentSwitch({
       current: panelType,
       target: mode.type,
       cliState: tabEntry?.cliState,
