@@ -36,6 +36,8 @@ interface TaskRecord {
   summary: string | null;
   changedFiles: string[];
   diffPreview: string | null;
+  interruptRequestedAt: string | null;
+  approvalEvents: { requestId: string; decision: 'accept' | 'decline'; commandHash: string; at: string }[];
   error: string | null;
 }
 const INSTANCE = randomUUID();
@@ -108,7 +110,8 @@ const markFinal = async (record: TaskRecord, status: TaskStatus, state?: CodexGu
     const items = itemsFor(record, state);
     record.summary = [...items].reverse().find((item) => item.type === 'assistant')?.text.slice(-MAX_OUTPUT) || null;
     record.changedFiles = [...new Set(items.filter((item) => item.type === 'file-change')
-      .map((item) => item.title || 'file-change'))].slice(0, 100);
+      .flatMap((item) => item.title?.split(', ') || [])
+      .filter((name) => name !== 'ファイル変更' && name !== 'file-change'))].slice(0, 100);
     if (record.turnId) {
       const runtime = await getLoadedCodexGuiRuntime(record.workspaceId, record.tabId);
       const diff = runtime?.getTurnDiff(record.turnId) || null;
@@ -247,7 +250,8 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
     workspaceId, tabId, hostId, directory: normalizeDirectory(directory), mode,
     status: 'queued', ownerInstance: INSTANCE, createdAt: now(), updatedAt: now(),
     threadId: null, turnId: null, userItemId: null, lastTurnStatus: null,
-    summary: null, changedFiles: [], diffPreview: null, error: null,
+    summary: null, changedFiles: [], diffPreview: null,
+    interruptRequestedAt: null, approvalEvents: [], error: null,
   };
   taskCache.set(taskId, record);
   try {
@@ -272,6 +276,8 @@ const summarize = async (record: TaskRecord, includeOutput: boolean, includeDiff
     threadId: record.threadId, turnId: record.turnId,
     lastTurnStatus: record.lastTurnStatus, error: record.error,
     hasSummary: !!record.summary, changedFiles: record.changedFiles,
+    interruptRequestedAt: record.interruptRequestedAt || null,
+    approvalResponseCount: record.approvalEvents?.length || 0,
   };
   if (includeOutput) {
     status.summary = record.summary;
@@ -346,6 +352,8 @@ export const interruptCodexTask = async (args: Record<string, unknown>) => {
     return fail('Active Codex turn changed; refusing to interrupt another task');
   }
   await runtime.action('interrupt', {});
+  record.interruptRequestedAt = now();
+  await persist(record);
   return { taskId: record.taskId, status: 'interrupt_requested', threadId: record.threadId,
     turnId: record.turnId, note: 'Use get_codex_task to confirm completion.' };
 };
@@ -373,6 +381,13 @@ export const respondCodexApproval = async (args: Record<string, unknown>) => {
     return fail('Approval request changed. Re-read get_codex_task(includeOutput=true).');
   }
   await runtime.action('approve', { requestId: approval.requestId, decision: args.decision });
+  record.approvalEvents = [
+    ...(record.approvalEvents || []).slice(-19),
+    { requestId: String(approval.requestId),
+      decision: args.decision as 'accept' | 'decline',
+      commandHash: fingerprint(approval.command), at: now() },
+  ];
+  await persist(record);
   return { taskId: record.taskId, requestId: approval.requestId, decision: args.decision,
     status: 'approval_response_sent' };
 };
