@@ -233,17 +233,21 @@ export const startMcpBridge = async (): Promise<IMcpBridgeHandle> => {
       jsonResponse(res, 413, { error: 'MCP request exceeds size limit' });
       return;
     }
-    let raw = '';
+    const chunks: Buffer[] = [];
+    let size = 0;
     try {
       for await (const chunk of req) {
-        raw += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-        if (Buffer.byteLength(raw) > MAX_BODY_BYTES) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.byteLength;
+        if (size > MAX_BODY_BYTES) {
           jsonResponse(res, 413, { error: 'MCP request exceeds size limit' });
           return;
         }
+        chunks.push(bytes);
       }
       let request: unknown;
-      try { request = JSON.parse(raw); }
+      // Decode once: multibyte UTF-8 characters may span TCP chunks.
+      try { request = JSON.parse(Buffer.concat(chunks, size).toString('utf8')); }
       catch {
         jsonResponse(res, 400, rpcError(null, -32700, 'JSON parse error'));
         return;
