@@ -206,6 +206,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     let reFitTimer = 0;
     let resizeObserver: ResizeObserver | null = null;
     let cleanupTouch: (() => void) | null = null;
+    let cleanupKeyboardViewport: (() => void) | null = null;
     let cleanupContextMenu: (() => void) | null = null;
 
     loadFonts().then(() => {
@@ -430,6 +431,33 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       });
 
       resizeObserver.observe(containerNode);
+      // Mobile virtual keyboards may shrink visualViewport without resizing
+      // the layout viewport. Keep the focused terminal and cursor visible.
+      if ('ontouchstart' in window && navigator.maxTouchPoints > 0 && window.visualViewport) {
+        const viewport = window.visualViewport;
+        const onViewportChange = () => {
+          if (disposed) return;
+          const keyboardHeight = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
+          const active = document.activeElement;
+          if (keyboardHeight < 100 || !active || !containerNode.contains(active)) return;
+          const rect = containerNode.getBoundingClientRect();
+          const visibleBottom = viewport.offsetTop + viewport.height;
+          if (rect.bottom > visibleBottom - 8) {
+            const scroller = containerNode.closest('[data-mobile-terminal-scroll]') as HTMLElement | null;
+            if (scroller) scroller.scrollTop += rect.bottom - visibleBottom + 8;
+          }
+          // Refresh xterm's viewport after visual keyboard animation.
+          requestAnimationFrame(() => { if (!disposed) doFit(); });
+          terminal.scrollToBottom();
+        };
+        viewport.addEventListener('resize', onViewportChange);
+        viewport.addEventListener('scroll', onViewportChange);
+        cleanupKeyboardViewport = () => {
+          viewport.removeEventListener('resize', onViewportChange);
+          viewport.removeEventListener('scroll', onViewportChange);
+        };
+      }
+
 
       // On touch screens: tap to focus the real xterm input; scroll with one
       // finger; long-press then drag to select terminal cells directly.
@@ -443,6 +471,8 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         let selecting = false;
         let moved = false;
         let startCell: { col: number; row: number } | null = null;
+        let selectionRaf = 0;
+        let selectionPointerY = 0;
         const clearTimer = () => { if (selectTimer) clearTimeout(selectTimer); selectTimer = null; };
         const toCell = (touch: Touch) => {
           const rect = screenEl.getBoundingClientRect();
@@ -461,10 +491,32 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           const length = Math.max(1, Math.abs(b - a) + 1);
           terminal.select(first % terminal.cols, Math.floor(first / terminal.cols), length);
         };
+        const autoScrollSelection = () => {
+          if (!selecting || !startCell) { selectionRaf = 0; return; }
+          const rect = screenEl.getBoundingClientRect();
+          const edge = Math.min(45, rect.height * 0.15);
+          let lines = 0;
+          if (selectionPointerY < rect.top + edge) lines = -Math.max(1, Math.ceil((rect.top + edge - selectionPointerY) / 14));
+          else if (selectionPointerY > rect.bottom - edge) lines = Math.max(1, Math.ceil((selectionPointerY - (rect.bottom - edge)) / 14));
+          if (lines) {
+            terminal.scrollLines(lines);
+            const row = Math.max(0, Math.min(terminal.rows - 1,
+              Math.floor((selectionPointerY - rect.top) / (rect.height / terminal.rows))));
+            const fakeEnd = { col: lastSelectionCol, row: row + terminal.buffer.active.viewportY };
+            const a = startCell.row * terminal.cols + startCell.col;
+            const b = fakeEnd.row * terminal.cols + fakeEnd.col;
+            const first = Math.min(a, b);
+            terminal.select(first % terminal.cols, Math.floor(first / terminal.cols), Math.max(1, Math.abs(b - a) + 1));
+          }
+          selectionRaf = requestAnimationFrame(autoScrollSelection);
+        };
+        let lastSelectionCol = 0;
         const onTouchStart = (event: TouchEvent) => {
           if (event.touches.length !== 1) { clearTimer(); return; }
           const touch = event.touches[0];
           lastY = touch.clientY;
+          selectionPointerY = touch.clientY;
+          lastSelectionCol = toCell(touch).col;
           touchStartX = touch.clientX;
           touchStartY = touch.clientY;
           moved = false;
@@ -474,6 +526,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             selecting = true;
             startCell = toCell(touch);
             updateSelection(touch);
+            selectionRaf = requestAnimationFrame(autoScrollSelection);
           }, 450);
         };
         const onTouchMove = (event: TouchEvent) => {
@@ -481,6 +534,8 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           const touch = event.touches[0];
           if (selecting) {
             event.preventDefault();
+            selectionPointerY = touch.clientY;
+            lastSelectionCol = toCell(touch).col;
             updateSelection(touch);
             return;
           }
@@ -498,6 +553,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         };
         const onTouchEnd = (event: TouchEvent) => {
           clearTimer();
+          cancelAnimationFrame(selectionRaf);
           if (selecting) {
             event.preventDefault();
             selecting = false;
@@ -505,13 +561,14 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             terminal.focus();
           }
         };
-        const onTouchCancel = () => { clearTimer(); selecting = false; };
+        const onTouchCancel = () => { clearTimer(); cancelAnimationFrame(selectionRaf); selecting = false; };
         containerNode.addEventListener('touchstart', onTouchStart, { passive: true });
         containerNode.addEventListener('touchmove', onTouchMove, { passive: false });
         containerNode.addEventListener('touchend', onTouchEnd, { passive: false });
         containerNode.addEventListener('touchcancel', onTouchCancel);
         cleanupTouch = () => {
           clearTimer();
+          cancelAnimationFrame(selectionRaf);
           containerNode.removeEventListener('touchstart', onTouchStart);
           containerNode.removeEventListener('touchmove', onTouchMove);
           containerNode.removeEventListener('touchend', onTouchEnd);
@@ -527,6 +584,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       clearTimeout(reFitTimer);
       resizeObserver?.disconnect();
       cleanupTouch?.();
+      cleanupKeyboardViewport?.();
       cleanupContextMenu?.();
       writeGenerationRef.current++;
       writeQueueRef.current = [];
