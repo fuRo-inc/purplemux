@@ -182,12 +182,14 @@ const execute = async (record: TaskRecord, instruction: string): Promise<void> =
         (!before.cwd || normalizeDirectory(before.cwd) !== record.directory)) {
       return fail('Codex thread working directory differs from the confirmed target. Choose a new thread explicitly.');
     }
+    // Switch threads BEFORE changing permissions. New-task requests must not
+    // mutate the old thread's sandbox or approval settings.
+    if (record.mode === 'new') await runtime.action('new-thread', {});
     // The default is read-only. Workspace writes require a separate explicit
     // request; Full Access and no-approval policies are never available via MCP.
     await runtime.action('settings', {
       sandboxMode: record.sandboxMode, approvalPolicy: 'on-request',
     });
-    if (record.mode === 'new') await runtime.action('new-thread', {});
     const configured = runtime.snapshot();
     if (configured.cwd && normalizeDirectory(configured.cwd) !== record.directory) {
       return fail('Codex working directory changed before task submission');
