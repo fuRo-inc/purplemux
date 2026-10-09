@@ -913,7 +913,7 @@ const MobileSurfaceView = ({
       )}
 
       {!isAgentPanel && !isWebBrowser && !isDiff && !isAgentSessionList && status === 'connected' && (
-        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} onFocusTerminal={focus} />
+        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} onFocusTerminal={focus} onHistory={() => void openTerminalHistory()} />
       )}
 
       {historyOpen && (
