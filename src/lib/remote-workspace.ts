@@ -21,6 +21,7 @@ export const buildRemoteShellCommand = async (
   }
   if (!sessionName || !/^pt-[a-zA-Z0-9-]+$/.test(sessionName)) throw new Error('Invalid remote tmux session name');
   const launch = initialCommand ? `bash -lic ${quote('codex; exec bash -l')}` : undefined;
-  const remote = `tmux -L purplemux_remote new-session -A -s ${quote(sessionName)} -c ${quote(workspace.remoteDirectory)}${launch ? ` ${quote(launch)}` : ''}`;
+  const socket = 'tmux -L purplemux_remote';
+  const remote = `${socket} has-session -t ${quote(sessionName)} 2>/dev/null || ${socket} new-session -d -s ${quote(sessionName)} -c ${quote(workspace.remoteDirectory)}${launch ? ` ${quote(launch)}` : ''}; ${socket} set -g mouse off && exec ${socket} attach-session -t ${quote(sessionName)}`;
   return `exec ssh -tt -o BatchMode=yes -o ConnectTimeout=5 -p ${host.port} ${quote(host.username + '@' + host.address)} ${quote(remote)}`;
 };
