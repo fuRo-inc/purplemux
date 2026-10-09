@@ -264,6 +264,23 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         // IME 조합 단계의 keydown(keyCode 229)은 가로채지 않는다. 같은 키가 조합용으로 한 번,
         // 실제 키로 한 번 들어오므로 실제 키만 처리해 중복 전송(단어 2칸 이동 등)을 막는다.
         if (event.isComposing || event.keyCode === 229) return true;
+        // Browser-style copy when text is selected. Without selection Ctrl+C
+        // still reaches the PTY as SIGINT.
+        const key = event.key.toLowerCase();
+        const copyShortcut = (event.ctrlKey && event.shiftKey && key === 'c') ||
+          (event.metaKey && key === 'c') ||
+          (event.ctrlKey && key === 'c' && terminal.hasSelection());
+        if (event.type === 'keydown' && copyShortcut && terminal.hasSelection()) {
+          event.preventDefault();
+          void copyToClipboard(terminal.getSelection());
+          return false;
+        }
+        // Let the native paste event reach xterm's hidden textarea;
+        // this also works when Clipboard.readText permission is unavailable.
+        if (event.type === 'keydown' && ((event.ctrlKey && event.shiftKey && key === 'v') ||
+          (event.metaKey && key === 'v'))) {
+          return true;
+        }
         // macOptionIsMeta가 이중 ESC를 보내는 키만 직접 매핑
         if (event.altKey && event.type === 'keydown') {
           const seq: Record<string, string> = {
