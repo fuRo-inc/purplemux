@@ -259,7 +259,11 @@ export const getLayout = async (wsId: string, defaultCwd?: string): Promise<ILay
     if (existing) return existing;
 
     const { pane, tab } = createDefaultPaneNode(wsId, defaultCwd);
-    await createSession(tab.sessionName, 80, 24, defaultCwd);
+    const workspace = await getWorkspaceById(wsId);
+    await createSession(tab.sessionName, 80, 24, workspace?.hostId ? undefined : defaultCwd);
+    if (workspace?.hostId) {
+      await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace));
+    }
 
     const layout: ILayoutData = {
       root: pane,
@@ -275,7 +279,11 @@ export const createPane = async (wsId: string, cwd?: string): Promise<{ paneId: 
   const tabId = generateTabId();
   const sessionName = workspaceSessionName(wsId, paneId, tabId);
 
-  await createSession(sessionName, 80, 24, cwd);
+  const workspace = await getWorkspaceById(wsId);
+  await createSession(sessionName, 80, 24, workspace?.hostId ? undefined : cwd);
+  if (workspace?.hostId) {
+    await sendKeys(sessionName, await buildRemoteShellCommand(workspace));
+  }
 
   const tab: ITab = { id: tabId, sessionName, name: '', order: 0, ...(cwd ? { cwd } : {}) };
   return { paneId, tab };
