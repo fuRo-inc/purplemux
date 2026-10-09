@@ -50,6 +50,23 @@ describe('MCP Codex write safety', () => {
     await expect(submitCodexTask({ ...base, instruction: '' })).rejects.toThrow('Instruction');
     await expect(submitCodexTask({ ...base, mode: 'run-as-root' })).rejects.toThrow('mode');
   });
+  it('starts with read-only permission unless workspace write is explicitly confirmed', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    await expect(submitCodexTask({ ...base, sandboxMode: 'workspace-write' }))
+      .rejects.toThrow('confirmWriteAccess');
+    await expect(submitCodexTask({ ...base, sandboxMode: 'workspace-write', confirmWriteAccess: false }))
+      .rejects.toThrow('confirmWriteAccess');
+  });
+  it('never allows danger-full-access or unrecognized sandbox modes over MCP', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    await expect(submitCodexTask({ ...base, sandboxMode: 'danger-full-access', confirmWriteAccess: true }))
+      .rejects.toThrow('sandboxMode');
+  });
+  it('does not accept a malformed explicit write confirmation', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    await expect(submitCodexTask({ ...base, confirmWriteAccess: 'true' }))
+      .rejects.toThrow('confirmWriteAccess');
+  });
   it('rejects malformed task IDs without filesystem access', async () => {
     await expect(getCodexTask({ taskId: '../etc/passwd' })).rejects.toThrow('Invalid taskId');
   });
