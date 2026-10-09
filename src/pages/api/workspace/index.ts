@@ -19,7 +19,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { directory, name, resumeSessionId, panelType } = req.body ?? {};
+    const { directory, name, resumeSessionId, panelType, hostId, remoteDirectory } = req.body ?? {};
     const provider = resumeSessionId ? getProviderByPanelType(panelType ?? 'claude-code') : null;
     if (resumeSessionId) {
       if (!provider) {
@@ -38,7 +38,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
     try {
       const layoutOptions = provider ? { panelType: provider.panelType } : undefined;
-      const workspace = await createWorkspace(resolvedDirectory, name, layoutOptions);
+      if (hostId && (typeof hostId !== 'string' || typeof remoteDirectory !== 'string')) {
+        return res.status(400).json({ error: 'hostId and remoteDirectory required' });
+      }
+      if (hostId && (resumeSessionId || panelType)) {
+        return res.status(400).json({ error: 'Remote workspace only supports terminal at creation' });
+      }
+      const workspace = await createWorkspace(resolvedDirectory, name, layoutOptions, hostId ? { hostId, remoteDirectory } : undefined);
 
       const layout = await readLayoutFile(resolveLayoutFile(workspace.id));
       const defaultTab = layout ? collectAllTabs(layout.root)[0] : null;
