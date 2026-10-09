@@ -104,3 +104,23 @@ stdin/stdoutの1行単位JSONをCLIのログ出力と混同しない。stderrは
 5. 別作業ディレクトリの会話選択で確認画面が出ることを確認する。
 6. GMKtec Remote Workspaceでも同様に操作し、検索対象がGMKtec側の履歴であることを確認する。
 7. ブラウザを再読み込みし、同じ `threadId` の会話に復帰できることを確認する。
+
+## 2026-10-09: Codex標準ライクな履歴・Permissions・Fast
+
+- 過去セッション検索を **cwdごとのグループ一覧** に変更し、Codex CLIのResume画面に近い Tasks / Status / Updated の密度で表示する。
+- 各作業ディレクトリは直近6件を表示し、`Show more` で展開する。マウスクリックに加え、↑↓・Enterに対応。
+- StatusはApp Serverの実データ（`thread.status`）から `idle→Ready`, `active→Running`, `notLoaded→Inactive`, `systemError→Error` に対応させる。推測で実行状態を生成しない。
+- 検索・ページング、Hostとcwdの絞り込み、異なるcwdを再開するときの確認は従来どおり維持する。
+- Chatヘッダに `Permissions` (read-only/workspace-write/danger-full-access) と `Approval` (on-request/never) を追加。標準は **workspace-write + on-request**。Full Access選択時には確認ダイアログを表示する。
+- 既存スレッドの権限更新は `thread/settings/update` に `sandboxPolicy` と `approvalPolicy` を渡し、次の実行へ反映する。新規スレッドとresumeもGUI上の選択を適用する。
+- モデル `model/list.serviceTiers` がfastを通知する場合のみFastを操作可能にする。**新規会話ではFast OFF**。Fast OFFの場合は `turn/start.serviceTierForTurn="default"`、ONの場合は `"fast"` として、過去セッションの速度設定を無意識に引き継がない。
+- 保存設定は `~/.purplemux/codex-app-sessions` のタブごとのJSON。非対応のホストではFastのONを禁止する。
+- App Server本体はNUC `0.160.1` / GMKtec `0.162.0` を想定。両リリースのv2プロトコル定義で上記フィールドを確認したが、**ビルド・実機検証は未実施**。
+
+### 確認項目
+
+1. `pnpm exec tsc --noEmit` がエラーなしで終了する。
+2. 「以前の会話」でcwdごとのグループとStatus/Updated列が表示される。矢印キー・Enter・Show more・検索が正しく機能する。
+3. LocalとGMKtecでPermissionとApprovalを変え、次のターンで選択が反映される。Full Accessには明示確認がある。
+4. Fastは対応モデル以外では操作不可。新規会話でOFF、ONにしたときのみfast層をリクエストする。
+5. 履歴から再開してもモデル・cwd・権限の状態がUIと実行に一致する。
