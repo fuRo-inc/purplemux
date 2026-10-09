@@ -170,6 +170,13 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     return lines.join('\n');
   }, []);
 
+  const copyTerminalText = useCallback(async (): Promise<boolean> => {
+    const terminal = terminalInstance.current;
+    if (!terminal) return false;
+    const text = terminal.hasSelection() ? terminal.getSelection() : getBufferText();
+    return copyToClipboard(text);
+  }, [getBufferText]);
+
   const fit = useCallback((): { cols: number; rows: number } => {
     const fitAddon = fitAddonRef.current;
     const terminal = terminalInstance.current;
@@ -496,7 +503,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     callbacksRef.current.onResize?.(terminal.cols, terminal.rows);
   }, [fontSize, lineHeight]);
 
-  return { terminalRef, write, clear, reset, fit, focus, isReady, getBufferText };
+  return { terminalRef, write, clear, reset, fit, focus, isReady, getBufferText, copyTerminalText };
 };
 
 export default useTerminal;
