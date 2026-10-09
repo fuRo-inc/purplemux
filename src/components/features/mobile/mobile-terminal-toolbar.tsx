@@ -9,6 +9,7 @@ interface IMobileTerminalToolbarProps {
   sendStdin: (data: string) => void;
   terminalConnected: boolean;
   onCopy: () => void;
+  getTerminalText: () => string;
 }
 
 const LINE_HEIGHT = 20;
@@ -18,11 +19,13 @@ const NERD_FONT_STYLE = { fontFamily: 'MesloLGLDZ, monospace' } as const;
 
 const KEYS = TERMINAL_KEYS;
 
-const MobileTerminalToolbar = ({ sendStdin, terminalConnected, onCopy }: IMobileTerminalToolbarProps) => {
+const MobileTerminalToolbar = ({ sendStdin, terminalConnected, onCopy, getTerminalText }: IMobileTerminalToolbarProps) => {
   const t = useTranslations('mobile');
   const [value, setValue] = useState('');
   const [ctrlActive, setCtrlActive] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [copyText, setCopyText] = useState('');
   const [pasteText, setPasteText] = useState('');
   const [shiftActive, setShiftActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -90,7 +93,7 @@ const MobileTerminalToolbar = ({ sendStdin, terminalConnected, onCopy }: IMobile
 
   const submitPaste = () => {
     if (!terminalConnected || !pasteText) return;
-    sendStdin(pasteText.replace(/\\r?\\n/g, '\\r'));
+    sendStdin(pasteText.replace(/\r?\n/g, '\r'));
     setPasteText('');
     setPasteOpen(false);
   };
@@ -101,10 +104,19 @@ const MobileTerminalToolbar = ({ sendStdin, terminalConnected, onCopy }: IMobile
         <Button variant="outline" size="sm" onClick={onCopy} className="gap-1">
           <Copy size={14} /> 表示をコピー
         </Button>
+        <Button variant="outline" size="sm" onClick={() => { setCopyText(getTerminalText()); setCopyOpen((prev) => !prev); }} className="gap-1">
+          範囲コピー
+        </Button>
         <Button variant="outline" size="sm" onClick={() => setPasteOpen((prev) => !prev)} className="gap-1" disabled={!terminalConnected}>
           <ClipboardPaste size={14} /> 貼り付け
         </Button>
       </div>
+      {copyOpen && (
+        <div className="px-3 pt-2">
+          <p className="mb-1 text-xs text-muted-foreground">テキストを長押しし、必要な範囲を選択してOS標準の「コピー」を使用してください。</p>
+          <textarea readOnly aria-label="ターミナル出力のコピー用テキスト" className="h-32 w-full resize-y rounded-md border bg-background p-2 font-mono text-xs" value={copyText} />
+        </div>
+      )}
       {pasteOpen && (
         <div className="flex items-end gap-2 px-3 pt-2">
           <textarea
