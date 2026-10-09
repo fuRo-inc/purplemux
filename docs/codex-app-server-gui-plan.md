@@ -124,3 +124,11 @@ stdin/stdoutの1行単位JSONをCLIのログ出力と混同しない。stderrは
 3. LocalとGMKtecでPermissionとApprovalを変え、次のターンで選択が反映される。Full Accessには明示確認がある。
 4. Fastは対応モデル以外では操作不可。新規会話でOFF、ONにしたときのみfast層をリクエストする。
 5. 履歴から再開してもモデル・cwd・権限の状態がUIと実行に一致する。
+
+## 2026-10-09: Fast / 履歴表示 / キーボード修正
+
+- `model/list.serviceTiers` は Fast のIDを `priority` と通知する場合がある。Fast判定で `fast` と `priority` の両方を認識し、`thread/start.serviceTier`／`turn/start.serviceTierForTurn` には**カタログが通知したID**を送る。Fastの初期値は引き続きOFF。
+- 履歴ダイアログは共通UIの `sm:max-w-sm` がPCで効いていたため、`sm:max-w-5xl` を明示して横幅を確保した。セッションのプレビューを最大2400文字まで保持し、選択した会話の本文・cwdを画面下部で折り返して確認できるようにした。
+- セッションの行は**クリックで選択・全文確認、ダブルクリックまたはEnter／再開ボタンで開く**。タップ操作でも誤再開を減らす。
+- Terminalでは `Ctrl+C` を**常にSIGINT**へ戻す。コピーは `Ctrl+Shift+C` (Windows/Linux)、`Cmd+C` (Mac)、右クリックの「コピー」を使用できる。右クリックメニューにも「割り込み (SIGINT)」を置く。通常の `Ctrl+V` 貼り付けは維持する。
+- 実機での型チェック・動作確認はまだ。NUCで `pnpm exec tsc --noEmit` を実行後、Fastモデル、セッション詳細、Ctrl+C割り込み／Ctrl+Shift+Cコピーを順に確認する。
