@@ -431,41 +431,91 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
 
       resizeObserver.observe(containerNode);
 
-      // 모바일 터치 → 합성 WheelEvent 변환 (tmux 스크롤 지원)
-      // tmux mouse mode 시 xterm.js가 .xterm-screen에 wheel 리스너를 붙이므로 해당 요소에 dispatch
+      // On touch screens: tap to focus the real xterm input; scroll with one
+      // finger; long-press then drag to select terminal cells directly.
       const isTouchDevice = 'ontouchstart' in window && navigator.maxTouchPoints > 0;
       const screenEl = containerNode.querySelector('.xterm-screen');
-
       if (isTouchDevice && screenEl) {
         let lastY = 0;
-
-        const onTouchStart = (e: TouchEvent) => {
-          lastY = e.touches[0].clientY;
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let selectTimer: ReturnType<typeof setTimeout> | null = null;
+        let selecting = false;
+        let moved = false;
+        let startCell: { col: number; row: number } | null = null;
+        const clearTimer = () => { if (selectTimer) clearTimeout(selectTimer); selectTimer = null; };
+        const toCell = (touch: Touch) => {
+          const rect = screenEl.getBoundingClientRect();
+          const col = Math.max(0, Math.min(terminal.cols - 1,
+            Math.floor((touch.clientX - rect.left) / (rect.width / terminal.cols))));
+          const row = Math.max(0, Math.min(terminal.rows - 1,
+            Math.floor((touch.clientY - rect.top) / (rect.height / terminal.rows))));
+          return { col, row: row + terminal.buffer.active.viewportY };
         };
-
-        const onTouchMove = (e: TouchEvent) => {
-          const currentY = e.touches[0].clientY;
-          const deltaY = lastY - currentY;
-          lastY = currentY;
-
+        const updateSelection = (touch: Touch) => {
+          if (!startCell) return;
+          const end = toCell(touch);
+          const a = startCell.row * terminal.cols + startCell.col;
+          const b = end.row * terminal.cols + end.col;
+          const first = Math.min(a, b);
+          const length = Math.max(1, Math.abs(b - a) + 1);
+          terminal.select(first % terminal.cols, Math.floor(first / terminal.cols), length);
+        };
+        const onTouchStart = (event: TouchEvent) => {
+          if (event.touches.length !== 1) { clearTimer(); return; }
+          const touch = event.touches[0];
+          lastY = touch.clientY;
+          touchStartX = touch.clientX;
+          touchStartY = touch.clientY;
+          moved = false;
+          selecting = false;
+          clearTimer();
+          selectTimer = setTimeout(() => {
+            selecting = true;
+            startCell = toCell(touch);
+            updateSelection(touch);
+          }, 450);
+        };
+        const onTouchMove = (event: TouchEvent) => {
+          if (event.touches.length !== 1) { clearTimer(); return; }
+          const touch = event.touches[0];
+          if (selecting) {
+            event.preventDefault();
+            updateSelection(touch);
+            return;
+          }
+          if (Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) > 9) {
+            moved = true;
+            clearTimer();
+          }
+          const deltaY = lastY - touch.clientY;
+          lastY = touch.clientY;
           if (Math.abs(deltaY) < 3) return;
-
-          e.preventDefault();
-          screenEl.dispatchEvent(
-            new WheelEvent('wheel', {
-              deltaY,
-              clientX: e.touches[0].clientX,
-              clientY: e.touches[0].clientY,
-              bubbles: true,
-            })
-          );
+          event.preventDefault();
+          screenEl.dispatchEvent(new WheelEvent('wheel', {
+            deltaY, clientX: touch.clientX, clientY: touch.clientY, bubbles: true,
+          }));
         };
-
+        const onTouchEnd = (event: TouchEvent) => {
+          clearTimer();
+          if (selecting) {
+            event.preventDefault();
+            selecting = false;
+          } else if (!moved) {
+            terminal.focus();
+          }
+        };
+        const onTouchCancel = () => { clearTimer(); selecting = false; };
         containerNode.addEventListener('touchstart', onTouchStart, { passive: true });
         containerNode.addEventListener('touchmove', onTouchMove, { passive: false });
+        containerNode.addEventListener('touchend', onTouchEnd, { passive: false });
+        containerNode.addEventListener('touchcancel', onTouchCancel);
         cleanupTouch = () => {
+          clearTimer();
           containerNode.removeEventListener('touchstart', onTouchStart);
           containerNode.removeEventListener('touchmove', onTouchMove);
+          containerNode.removeEventListener('touchend', onTouchEnd);
+          containerNode.removeEventListener('touchcancel', onTouchCancel);
         };
       }
     });
