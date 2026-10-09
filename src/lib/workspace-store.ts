@@ -333,7 +333,7 @@ export const createWorkspace = async (directory: string, name?: string, layoutOp
     const workspace: IWorkspace = { id: wsId, name: wsName, directories: [directory], ...(remote ? { hostId: remote.hostId, remoteDirectory: remote.remoteDirectory } : {}) };
     if (remote) {
       const tab = collectAllTabs(layout.root)[0];
-      if (tab) await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace));
+      if (tab) await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace, undefined, tab.sessionName));
     }
     data.workspaces.push(workspace);
     await writeWorkspacesFile(data);
