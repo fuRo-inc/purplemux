@@ -79,6 +79,8 @@ export interface IWorkspace {
   name: string;
   directories: string[];
   groupId?: string | null;
+  hostId?: string;
+  remoteDirectory?: string;
 }
 
 export interface IWorkspaceGroup {
