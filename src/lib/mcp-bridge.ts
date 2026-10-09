@@ -104,12 +104,22 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
       supported: SUPPORTED_VERSIONS, requested: version,
     });
   }
+  const requestMeta = asObject(asObject(req.params)._meta);
+  const metaVersion = requestMeta['io.modelcontextprotocol/protocolVersion'];
+  if (protocolVersion && typeof metaVersion === 'string' && metaVersion !== protocolVersion) {
+    return rpcError(id, -32600, 'MCP protocol version header and request metadata disagree');
+  }
+  const modern = version === PROTOCOL_MODERN;
+  // Modern MCP requires resultType on every successful RPC response.
+  // Retain unmodified legacy responses for 2025-era initialize clients.
+  const respond = (value: JsonObject): RpcReply =>
+    rpcResult(id, modern ? { resultType: 'complete', ...value } : value);
   if (req.method.startsWith('notifications/')) return null;
   const params = asObject(req.params);
   try {
     switch (req.method) {
       case 'server/discover':
-        return rpcResult(id, {
+        return respond({
           resultType: 'complete',
           supportedVersions: [PROTOCOL_MODERN],
           capabilities: { tools: {} },
@@ -117,16 +127,16 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
           instructions,
         });
       case 'initialize':
-        return rpcResult(id, {
+        return respond({
           protocolVersion: PROTOCOL_LEGACY,
           capabilities: { tools: { listChanged: false } },
           serverInfo,
           instructions,
         });
       case 'ping':
-        return rpcResult(id, {});
+        return respond({});
       case 'tools/list':
-        return rpcResult(id, { tools });
+        return respond({ tools });
       case 'tools/call': {
         if (typeof params.name !== 'string') return rpcError(id, -32602, 'Tool name required');
         const args = asObject(params.arguments);
@@ -147,7 +157,7 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
           default:
             return rpcError(id, -32602, 'Unknown read-only tool');
         }
-        return rpcResult(id, {
+        return respond({
           content: [{ type: 'text', text: serializeJson(data) }],
           structuredContent: data,
           isError: false,
@@ -158,7 +168,7 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Read-only tool failed';
-    return rpcResult(id, { content: [{ type: 'text', text: message.slice(0, 220) }], isError: true });
+    return respond({ content: [{ type: 'text', text: message.slice(0, 220) }], isError: true });
   }
 };
 
