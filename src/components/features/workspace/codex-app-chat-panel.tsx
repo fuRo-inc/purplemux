@@ -133,6 +133,10 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
     void saveSettings({ approvalPolicy: next }).catch(() => {});
   };
   const changeFast = (checked: boolean) => {
+    if (checked && !fastAvailable &&
+        !window.confirm('このモデルの一覧にFast対応情報がありません。Fast（priority）を要求しますが、Host側のアカウント・モデルが対応していなければ失敗するか通常速度になる場合があります。試しますか？')) {
+      return;
+    }
     void saveSettings({ fastMode: checked }).catch(() => {});
   };
 
@@ -284,7 +288,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
         </label>
         <label
           className="flex cursor-pointer items-center gap-1.5 text-xs"
-          title={fastAvailable ? 'Fastサービス層を使用（通常はOFF）' : '現在のモデル・HostではFastが利用できません'}
+          title={fastAvailable ? 'Fastサービス層を使用（通常はOFF）' : 'このHostはFast対応を広告していません。ONでpriorityを明示的に要求できますが、加速は保証されません'}
         >
           <Zap className="h-3.5 w-3.5 text-muted-foreground" />
           <span className="text-muted-foreground">Fast</span>
@@ -292,11 +296,11 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             type="checkbox"
             aria-label="Codex Fastモード"
             className="h-4 w-4 accent-foreground"
-            checked={fastAvailable && state.fastMode}
-            disabled={!fastAvailable || !connected || state.busy || settingBusy}
+            checked={state.fastMode}
+            disabled={!connected || state.busy || settingBusy}
             onChange={(event) => changeFast(event.target.checked)}
           />
-          <span className="text-[11px] text-muted-foreground">{fastAvailable && state.fastMode ? 'ON' : 'OFF'}</span>
+          <span className="text-[11px] text-muted-foreground">{state.fastMode ? (fastAvailable ? 'ON' : 'ON（未確認）') : 'OFF'}</span>
         </label>
       </div>
       {state.sandboxMode === 'danger-full-access' && (
