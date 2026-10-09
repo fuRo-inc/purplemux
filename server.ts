@@ -4,6 +4,7 @@ import { createServer, request as httpRequest } from 'http';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createConnection } from 'net';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import next from 'next';
 import { WebSocketServer } from 'ws';
 import { verifySessionToken, SESSION_COOKIE, extractCookie } from './src/lib/auth';
@@ -220,7 +221,9 @@ const startDev = async (port: number, appDir: string, bindHost: string): Promise
 
   const upgrade = app.getUpgradeHandler();
   const server = createServer((req, res) => {
-    if (!isRequestAllowed(req.socket.remoteAddress)) {
+    if (!isRequestAllowed(req.socket.remoteAddress) ||
+        (req.url?.split('?')[0] === '/api/mcp-internal' &&
+          !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || ''))) {
       rejectRequest(res);
       return;
     }
@@ -280,6 +283,9 @@ const startDev = async (port: number, appDir: string, bindHost: string): Promise
 
 const startProd = async (port: number, appDir: string, bindHost: string): Promise<IStartResult> => {
   const internalPort = await getFreePort();
+  if (process.env.PURPLEMUX_MCP_ENABLED === '1') {
+    process.env.__PMUX_MCP_INTERNAL_PORT = String(internalPort);
+  }
 
   const savedPort = process.env.PORT;
   process.env.PORT = String(internalPort);
@@ -294,7 +300,8 @@ const startProd = async (port: number, appDir: string, bindHost: string): Promis
   await waitForPort(internalPort);
 
   const server = createServer((req, res) => {
-    if (!isRequestAllowed(req.socket.remoteAddress)) {
+    if (!isRequestAllowed(req.socket.remoteAddress) ||
+        req.url?.split('?')[0] === '/api/mcp-internal') {
       rejectRequest(res);
       return;
     }
@@ -358,6 +365,11 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
   await acquireLock(port);
   registerLockCleanup();
 
+  // Per-boot secret authenticates the private MCP -> Next.js runtime RPC.
+  // Must exist before Next app preparation or standalone startup.
+  if (process.env.PURPLEMUX_MCP_ENABLED === '1') {
+    process.env.__PMUX_MCP_INTERNAL_TOKEN = randomBytes(32).toString('hex');
+  }
   await Promise.all([initConfigStore(), initShellPath()]);
 
   const credentials = await initAuthCredentials();
@@ -385,6 +397,7 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
 
   if (process.env.PURPLEMUX_MCP_ENABLED === '1') {
     try {
+      if (dev) process.env.__PMUX_MCP_INTERNAL_PORT = String(result.port);
       // Separate loopback-only listener, never routed through the browser UI.
       // Secure MCP Tunnel uses the authenticated stdio proxy to reach it.
       const bridge = await startMcpBridge();
