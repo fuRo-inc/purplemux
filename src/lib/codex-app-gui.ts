@@ -42,8 +42,8 @@ const sessions = globalThis as unknown as { __purplemuxCodexApps?: Map<string, P
 if (!sessions.__purplemuxCodexApps) sessions.__purplemuxCodexApps = new Map();
 const runtimes = sessions.__purplemuxCodexApps;
 const KEY_RE = /^[a-zA-Z0-9_-]{1,120}$/;
-const MAX_ITEMS = 250;
-const MAX_TEXT = 120000;
+const MAX_ITEMS = 160;
+const MAX_TEXT = 48000;
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const RETAINED_DIR = path.join(os.homedir(), '.purplemux', 'codex-app-sessions');
 
