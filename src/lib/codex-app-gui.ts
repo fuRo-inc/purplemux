@@ -235,7 +235,11 @@ export class CodexGuiRuntime {
           title: asString(item.command), status: 'running',
         });
       } else if (type === 'fileChange') {
-        this.upsert(itemId, 'file-change', { title: 'ファイル変更', status: 'running' });
+        const paths = (Array.isArray(item.changes) ? item.changes : [])
+          .map((entry) => asString(asRecord(entry).path)).filter(Boolean).slice(0, 20);
+        this.upsert(itemId, 'file-change', {
+          title: paths.join(', ') || 'ファイル変更', status: 'running',
+        });
       } else if (type === 'agentMessage') {
         this.upsert(itemId, 'assistant', { status: 'streaming' });
       }
@@ -257,8 +261,17 @@ export class CodexGuiRuntime {
           status: asString(item.status) || 'completed',
         });
       } else if (type === 'fileChange') {
-        this.upsert(itemId, 'file-change', { status: asString(item.status) || 'completed' });
+        const paths = (Array.isArray(item.changes) ? item.changes : [])
+          .map((entry) => asString(asRecord(entry).path)).filter(Boolean).slice(0, 20);
+        this.upsert(itemId, 'file-change', {
+          ...(paths.length ? { title: paths.join(', ') } : {}),
+          status: asString(item.status) || 'completed',
+        });
       }
+    } else if (method === 'item/fileChange/patchUpdated' && itemId) {
+      const paths = (Array.isArray(params.changes) ? params.changes : [])
+        .map((entry) => asString(asRecord(entry).path)).filter(Boolean).slice(0, 20);
+      if (paths.length) this.upsert(itemId, 'file-change', { title: paths.join(', ') });
     } else if (method === 'turn/plan/updated') {
       const steps = Array.isArray(params.plan) ? params.plan : [];
       const description = steps.map((entry) => {
