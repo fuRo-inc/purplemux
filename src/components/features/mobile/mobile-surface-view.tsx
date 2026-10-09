@@ -830,7 +830,7 @@ const MobileSurfaceView = ({
       )}
 
       {!isAgentPanel && !isWebBrowser && !isDiff && !isAgentSessionList && status === 'connected' && (
-        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} getTerminalText={getBufferText} />
+        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} onFocusTerminal={focus} />
       )}
 
       {agentModePrompt && agentModePrompt.tabId === activeTabId && panelType === 'terminal' && (
