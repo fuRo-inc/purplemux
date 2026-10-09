@@ -132,3 +132,12 @@ stdin/stdoutの1行単位JSONをCLIのログ出力と混同しない。stderrは
 - セッションの行は**クリックで選択・全文確認、ダブルクリックまたはEnter／再開ボタンで開く**。タップ操作でも誤再開を減らす。
 - Terminalでは `Ctrl+C` を**常にSIGINT**へ戻す。コピーは `Ctrl+Shift+C` (Windows/Linux)、`Cmd+C` (Mac)、右クリックの「コピー」を使用できる。右クリックメニューにも「割り込み (SIGINT)」を置く。通常の `Ctrl+V` 貼り付けは維持する。
 - 実機での型チェック・動作確認はまだ。NUCで `pnpm exec tsc --noEmit` を実行後、Fastモデル、セッション詳細、Ctrl+C割り込み／Ctrl+Shift+Cコピーを順に確認する。
+
+## 2026-10-09: Clipboard / Fastフォローアップ
+
+- `Ctrl+C` は **xtermに選択範囲があればコピー、未選択ならSIGINT**。コピー成功後は選択範囲を解除する。明示的なコピーは `Ctrl+Shift+C`、macOSは `Cmd+C`、右クリックでも可能。右クリックには常時使えるSIGINT操作も残す。
+- `Ctrl+V`／`Cmd+V` はブラウザのtrusted `paste` イベントを捕捉し、`Terminal.paste()` でxterm.jsへ入力する。xterm.jsが有効なbracketed paste・改行処理を行う。
+- HTTP（Tailscale IP）で `navigator.clipboard.readText` が許可されないときに表示していた貼り付け用テキスト欄は削除。右クリックの「貼り付け」はHTTPS等でAPIが許可されるとき直接実行し、許可されないときはモーダルを表示せず `Ctrl+V` を案内する。
+- Fast は **OFFが初期値**。モデル一覧にFast/priority tierが記載される場合はそれを要求する。一覧に記載がないときもユーザーが警告を確認した場合に限り `priority` を試行可能にする。未広告の場合の表示は「ON（未確認）」であり、加速を保証しない。
+- 新規会話・既存会話の `turn/start` に `serviceTierForTurn` を指定。対応しないモデル・アカウントのエラーはGUIへ明示し、黙ってFastが機能したと扱わない。
+- NUC／GMKtec実機検証、TypeScriptの型チェックは利用者端末で要実施。特に非HTTPS上の `Ctrl+V` と、fast tierが提供されないモデルでのON時のエラー表示を確認する。
