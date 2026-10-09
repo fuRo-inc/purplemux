@@ -10,7 +10,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveCodexAppTab } from '@/lib/codex-app-tab';
-import { getCodexGuiRuntime, peekCodexGuiRuntime, type CodexGuiRuntime, type CodexGuiState } from '@/lib/codex-app-gui';
+import { getCodexGuiRuntime, getLoadedCodexGuiRuntime, peekCodexGuiRuntime, type CodexGuiState } from '@/lib/codex-app-gui';
 
 type TaskStatus = 'queued' | 'starting' | 'running' | 'awaiting_approval' |
   'completed' | 'failed' | 'interrupted' | 'unknown';
@@ -35,6 +35,7 @@ interface TaskRecord {
   lastTurnStatus: string | null;
   summary: string | null;
   changedFiles: string[];
+  diffPreview: string | null;
   error: string | null;
 }
 const INSTANCE = randomUUID();
@@ -108,6 +109,15 @@ const markFinal = async (record: TaskRecord, status: TaskStatus, state?: CodexGu
     record.summary = [...items].reverse().find((item) => item.type === 'assistant')?.text.slice(-MAX_OUTPUT) || null;
     record.changedFiles = [...new Set(items.filter((item) => item.type === 'file-change')
       .map((item) => item.title || 'file-change'))].slice(0, 100);
+    if (record.turnId) {
+      const runtime = await getLoadedCodexGuiRuntime(record.workspaceId, record.tabId);
+      const diff = runtime?.getTurnDiff(record.turnId) || null;
+      if (diff) {
+        record.diffPreview = diff.slice(0, 32000);
+        const changed = [...diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => match[1]);
+        if (changed.length) record.changedFiles = [...new Set(changed)].slice(0, 100);
+      }
+    }
   }
   await persist(record);
   unsubs.get(record.taskId)?.();
@@ -237,7 +247,7 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
     workspaceId, tabId, hostId, directory: normalizeDirectory(directory), mode,
     status: 'queued', ownerInstance: INSTANCE, createdAt: now(), updatedAt: now(),
     threadId: null, turnId: null, userItemId: null, lastTurnStatus: null,
-    summary: null, changedFiles: [], error: null,
+    summary: null, changedFiles: [], diffPreview: null, error: null,
   };
   taskCache.set(taskId, record);
   try {
@@ -278,10 +288,12 @@ const summarize = async (record: TaskRecord, includeOutput: boolean, includeDiff
     }
   }
   if (includeDiff && record.turnId) {
-    const { workspace, tab } = await resolveCodexAppTab(record.workspaceId, record.tabId);
-    const runtime = await getCodexGuiRuntime(workspace, tab);
-    status.diff = (runtime.getTurnDiff(record.turnId) || '').slice(0, 16000);
-    status.diffTruncated = (runtime.getTurnDiff(record.turnId)?.length || 0) > 16000;
+    // A read-only status request must NEVER start/resume a Codex process.
+    const runtime = await getLoadedCodexGuiRuntime(record.workspaceId, record.tabId);
+    const diff = runtime?.getTurnDiff(record.turnId) || record.diffPreview || '';
+    status.diff = diff.slice(0, 16000);
+    status.diffTruncated = diff.length > 16000;
+    status.diffAvailable = diff.length > 0;
   }
   return status;
 };
@@ -298,7 +310,7 @@ export const listCodexTasks = async (args: Record<string, unknown>) => {
   if (args.workspaceId !== undefined) asId(args.workspaceId, 'workspaceId');
   const limit = args.limit === undefined ? 20 : Number(args.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) return fail('limit must be 1–50');
-  const files = (await fs.readdir(TASK_DIR).catch(() => [] as string[]))
+  const files = (await fs.readdir(TASK_DIR).catch((): string[] => []))
     .filter((name) => TASK_ID_RE.test(name.replace(/\.json$/, '')) && name.endsWith('.json'));
   const records: TaskRecord[] = [];
   for (const filename of files.slice(-500)) {
