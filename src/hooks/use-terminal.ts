@@ -297,6 +297,14 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       // Keep a small terminal menu, but never interrupt typing with a modal.
       let menu: HTMLDivElement | null = null;
       const closeMenu = () => { menu?.remove(); menu = null; };
+      const copySelection = () => {
+        const selection = terminal.getSelection();
+        if (!selection) return;
+        void copyToClipboard(selection).then((ok) => {
+          if (ok) terminal.clearSelection();
+          else toast.error('コピーできませんでした', { id: COPY_TOAST_ID });
+        }).finally(() => terminal.focus());
+      };
       const menuButton = (label: string, shortcut: string, handler: () => void, disabled = false) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -345,7 +353,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         div.style.cssText = 'position:fixed;z-index:2147483647;min-width:250px;padding:5px 0;border:1px solid #494949;border-radius:9px;background:#252525;color:#f5f5f5;box-shadow:0 12px 30px #0008;';
         const selection = terminal.getSelection();
         div.append(
-          menuButton('コピー', 'Ctrl+C / Ctrl+Shift+C', () => { void copyToClipboard(selection).finally(() => terminal.focus()); }, !selection),
+          menuButton('コピー', 'Ctrl+C / Ctrl+Shift+C', copySelection, !selection),
           menuButton('割り込み (SIGINT)', 'Ctrl+C', () => { callbacksRef.current.onInput?.('\x03'); terminal.focus(); }),
           menuButton('貼り付け', 'Ctrl+V', () => { void pasteClipboard(); }),
           menuButton('すべて選択', 'Ctrl+A', () => { terminal.selectAll(); terminal.focus(); }),
@@ -404,7 +412,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && key === 'c') {
           event.preventDefault();
           if (terminal.hasSelection()) {
-            void copyToClipboard(terminal.getSelection()).finally(() => terminal.focus());
+            copySelection();
           } else if (!event.shiftKey) {
             callbacksRef.current.onInput?.('\x03');
           }
@@ -412,7 +420,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         }
         if (event.type === 'keydown' && event.metaKey && !event.ctrlKey && key === 'c') {
           event.preventDefault();
-          if (terminal.hasSelection()) void copyToClipboard(terminal.getSelection()).finally(() => terminal.focus());
+          if (terminal.hasSelection()) copySelection();
           return false;
         }
         // Don't let xterm consume the shortcut: allow the browser to emit its
