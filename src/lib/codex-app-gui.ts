@@ -385,44 +385,53 @@ export class CodexGuiRuntime {
     scope?: 'workspace' | 'host';
   }): Promise<CodexGuiSessionPage> {
     if (!this.state.ready || this.closed) throw new Error('Codex App Server is unavailable');
-    const cursor = options.cursor || '';
+    let cursor = options.cursor || '';
     if (cursor.length > 3000) throw new Error('Invalid history cursor');
-    const search = (options.search || '').trim();
+    const search = (options.search || '').trim().toLocaleLowerCase();
     if (search.length > 160) throw new Error('Search text is too long');
     const workspaceCwd = this.getWorkspaceCwd();
-    const params: Json = {
-      limit: 50,
-      sortKey: 'updated_at',
-      sortDirection: 'desc',
-      ...(cursor ? { cursor } : {}),
-      ...(search ? { searchTerm: search } : {}),
-      ...(options.scope === 'workspace' && workspaceCwd ? { cwd: workspaceCwd } : {}),
-    };
-    const result = await this.request('thread/list', params, 45000);
-    const sessions = (Array.isArray(result.data) ? result.data : []).map((raw): CodexGuiSessionSummary | null => {
-      const thread = asRecord(raw);
-      const id = asString(thread.id);
-      if (!THREAD_ID_RE.test(id) || thread.ephemeral === true || thread.parentThreadId) return null;
-      const source = thread.source;
-      const sourceKind = typeof source === 'string' ? source : asString(asRecord(source).type);
-      const status = thread.status;
-      return {
-        id,
-        preview: asString(thread.preview).slice(0, 600),
-        cwd: asString(thread.cwd),
-        createdAt: typeof thread.createdAt === 'number' ? thread.createdAt : 0,
-        updatedAt: typeof thread.updatedAt === 'number' ? thread.updatedAt : 0,
-        model: asString(thread.model) || null,
-        source: sourceKind || 'cli',
-        status: typeof status === 'string' ? status : asString(asRecord(status).type),
+    const sessions: CodexGuiSessionSummary[] = [];
+    // Search preview, cwd, model and ID using the same filter, independently
+    // of whether the installed Codex version supports thread/list.searchTerm.
+    // Bound each response so older histories cannot block the UI indefinitely.
+    const maxPages = search ? 4 : 1;
+    for (let page = 0; page < maxPages; page++) {
+      const params: Json = {
+        limit: search ? 75 : 50,
+        sortKey: 'updated_at',
+        sortDirection: 'desc',
+        ...(cursor ? { cursor } : {}),
+        ...(options.scope === 'workspace' && workspaceCwd ? { cwd: workspaceCwd } : {}),
       };
-    }).filter((thread): thread is CodexGuiSessionSummary => thread !== null);
-    return {
-      sessions,
-      nextCursor: asString(result.nextCursor) || null,
-      currentThreadId: this.state.threadId,
-      workspaceCwd,
-    };
+      const result = await this.request('thread/list', params, 45000);
+      for (const raw of (Array.isArray(result.data) ? result.data : [])) {
+        const thread = asRecord(raw);
+        const id = asString(thread.id);
+        if (!THREAD_ID_RE.test(id) || thread.ephemeral === true || thread.parentThreadId) continue;
+        const source = thread.source;
+        const sourceKind = typeof source === 'string' ? source : asString(asRecord(source).type);
+        const status = thread.status;
+        const item: CodexGuiSessionSummary = {
+          id,
+          preview: asString(thread.preview).slice(0, 600),
+          cwd: asString(thread.cwd),
+          createdAt: typeof thread.createdAt === 'number' ? thread.createdAt : 0,
+          updatedAt: typeof thread.updatedAt === 'number' ? thread.updatedAt : 0,
+          model: asString(thread.model) || null,
+          source: sourceKind || 'cli',
+          status: typeof status === 'string' ? status : asString(asRecord(status).type),
+        };
+        if (search && ![item.preview, item.cwd, item.id, item.model || ''].join(' ').toLocaleLowerCase().includes(search)) continue;
+        sessions.push(item);
+      }
+      const next = asString(result.nextCursor);
+      if (!next || next === cursor) {
+        cursor = '';
+        break;
+      }
+      cursor = next;
+    }
+    return { sessions, nextCursor: cursor || null, currentThreadId: this.state.threadId, workspaceCwd };
   }
 
   async resumeThread(threadId: string): Promise<CodexGuiState> {
