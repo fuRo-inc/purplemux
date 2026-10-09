@@ -61,6 +61,7 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
   const [open, setOpen] = useState(false);
   const isMobile = useIsMobile();
   const wsId = useLayoutStore((s) => s.workspaceId);
+  const isRemoteWorkspace = useWorkspaceStore((s) => s.workspaces.some((w) => w.id === wsId && !!w.hostId));
   const codexI18n = useCodexI18n();
   const { ensureAgentInstalled, installDialogs } = useAgentInstallCheck();
 
@@ -72,8 +73,9 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
       { key: 'terminal', type: 'terminal' as const, icon: <ProcessIcon className="h-3.5 w-3.5 text-muted-foreground" />, label: 'Terminal' },
       { key: 'web-browser', type: 'web-browser' as const, icon: <Globe className="h-3.5 w-3.5 text-muted-foreground" />, label: 'Web Browser' },
     ];
+    if (isRemoteWorkspace) return all.filter((item) => item.key === 'codex' || item.key === 'terminal');
     return isMobile ? all.filter((item) => item.key !== 'web-browser') : all;
-  }, [isMobile, t]);
+  }, [isMobile, isRemoteWorkspace, t]);
 
   const [activeIndex, setActiveIndex] = useState(0);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -108,7 +110,9 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
   const launchCodexNewConversation = useCallback(async () => {
     const workspace = useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId);
     if (workspace?.hostId) {
-      onCreateTab('terminal', { command: 'remote-codex' });
+      // Remote Codex has the same Chat / Terminal modes as local Codex.
+      // The server launches the CLI in this tab's persistent remote tmux.
+      onCreateTab('codex-cli');
       return;
     }
     if (!await ensureAgentInstalled('codex')) return;
