@@ -42,6 +42,7 @@ export type CodexGuiSessionPage = {
   currentThreadId: string | null;
   workspaceCwd: string;
 };
+const isFastTier = (id: string): boolean => id === 'fast' || id === 'priority';
 const THREAD_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 export type CodexGuiSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -367,12 +368,15 @@ export class CodexGuiRuntime {
                 name: asString(asRecord(tier).name),
                 description: asString(asRecord(tier).description),
               })),
-            // Codex 0.160.x still includes a deprecated speed-tier list.
+            // Older model catalogs advertise "priority" instead of "fast".
+            // The deprecated additionalSpeedTiers field is a fallback only.
             ...(
-              !(Array.isArray(value.serviceTiers) && value.serviceTiers.some((tier) => asString(asRecord(tier).id) === 'fast')) &&
+              !(Array.isArray(value.serviceTiers) &&
+                value.serviceTiers.some((tier) => isFastTier(asString(asRecord(tier).id)))) &&
               Array.isArray(value.additionalSpeedTiers)
-                ? value.additionalSpeedTiers.filter((tier) => tier === 'fast')
-                    .map(() => ({ id: 'fast', name: 'Fast', description: '' }))
+                ? value.additionalSpeedTiers
+                    .filter((tier) => typeof tier === 'string' && isFastTier(tier))
+                    .map((tier) => ({ id: tier as string, name: 'Fast', description: '' }))
                 : []
             ),
           ],
@@ -386,7 +390,7 @@ export class CodexGuiRuntime {
       }
       const active = this.state.models.find((item) =>
         item.model === (this.state.model || this.state.models.find((entry) => entry.isDefault)?.model));
-      if (this.state.fastMode && !active?.serviceTiers.some((tier) => tier.id === 'fast')) {
+      if (this.state.fastMode && !active?.serviceTiers.some((tier) => isFastTier(tier.id))) {
         this.state.fastMode = false;
         await this.store();
       }
@@ -528,7 +532,7 @@ export class CodexGuiRuntime {
         }
         const model = this.state.models.find((entry) =>
           entry.model === (this.state.model || this.state.models.find((m) => m.isDefault)?.model));
-        if (this.state.fastMode && !model?.serviceTiers.some((tier) => tier.id === 'fast')) {
+        if (this.state.fastMode && !model?.serviceTiers.some((tier) => isFastTier(tier.id))) {
           this.state.fastMode = false;
         }
         this.restore(history);
@@ -643,10 +647,12 @@ export class CodexGuiRuntime {
     }
     const activeModel = this.state.models.find((m) =>
       m.model === (this.state.model || this.state.models.find((x) => x.isDefault)?.model));
-    const fastSupported = activeModel?.serviceTiers.some((tier) => tier.id === 'fast') ?? false;
-    if (args.fastMode === true && !fastSupported) throw new Error('Fast is unavailable for this model on this host');
+    const supportedFastTier = activeModel?.serviceTiers.find((tier) => isFastTier(tier.id))?.id ?? null;
+    if (args.fastMode === true && !supportedFastTier) {
+      throw new Error('このHostのモデル一覧ではFastが利用可能として通知されていません');
+    }
     if (args.fastMode !== undefined) this.state.fastMode = args.fastMode;
-    else if (!fastSupported) this.state.fastMode = false;
+    else if (!supportedFastTier) this.state.fastMode = false;
 
     try {
       if (this.state.threadId &&
@@ -690,7 +696,7 @@ export class CodexGuiRuntime {
           if (!cwd.startsWith('/')) throw new Error('Codex workspace directory must be absolute');
           const result = await this.request('thread/start', {
             cwd, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandboxMode,
-            serviceTier: this.state.fastMode ? 'fast' : 'default',
+            serviceTier: this.state.fastMode ? supportedFastTier : 'default',
             ...(this.state.model ? { model: this.state.model } : {}),
           }, 45000);
           const id = asString(asRecord(result.thread).id);
@@ -707,7 +713,7 @@ export class CodexGuiRuntime {
           input: [{ type: 'text', text, text_elements: [] }],
           ...(this.state.model ? { model: this.state.model } : {}),
           ...(this.state.effort ? { effort: this.state.effort } : {}),
-          serviceTierForTurn: this.state.fastMode ? 'fast' : 'default',
+          serviceTierForTurn: this.state.fastMode ? supportedFastTier : 'default',
         }, 45000);
         this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;
       } catch (error) {
