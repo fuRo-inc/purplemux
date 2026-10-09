@@ -9,7 +9,7 @@ export type TConnectionStatus =
 
 export type TDisconnectReason = 'max-connections' | 'pty-error' | 'session-not-found' | 'reconnect-exhausted' | null;
 
-export type TPanelType = 'terminal' | 'claude-code' | 'codex-cli' | 'agent-sessions' | 'web-browser' | 'diff';
+export type TPanelType = 'terminal' | 'claude-code' | 'codex-cli' | 'codex-chat' | 'agent-sessions' | 'web-browser' | 'diff';
 export type TDiffViewMode = 'split' | 'unified';
 export type TDiffTab = 'changes' | 'history';
 
