@@ -209,6 +209,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     let cleanupTouch: (() => void) | null = null;
     let cleanupKeyboardViewport: (() => void) | null = null;
     let cleanupContextMenu: (() => void) | null = null;
+    let cleanupDesktopHistoryWheel: (() => void) | null = null;
 
     loadFonts().then(() => {
       if (disposed) return;
@@ -252,6 +253,33 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       terminal.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
 
       terminal.open(containerNode);
+      // xterm only knows the screen that tmux has rendered. When the user
+      // wheels upward past its own top, request tmux-owned scrollback.
+      // The regular wheel handler is untouched until the boundary is reached.
+      let upwardWheelAtTop = 0;
+      let lastWheelTime = 0;
+      let lastHistoryOpenAt = 0;
+      const onHistoryWheel = (event: WheelEvent) => {
+        if (!callbacksRef.current.onHistoryRequested || event.ctrlKey || event.metaKey ||
+            event.deltaY >= 0 || terminal.buffer.active.viewportY > 0) {
+          upwardWheelAtTop = 0;
+          return;
+        }
+        if (event.timeStamp - lastWheelTime > 650) upwardWheelAtTop = 0;
+        lastWheelTime = event.timeStamp;
+        const deltaPixels = Math.abs(event.deltaY) * (event.deltaMode === 1 ? 18 : event.deltaMode === 2 ? 150 : 1);
+        upwardWheelAtTop += deltaPixels;
+        if (upwardWheelAtTop < 45 || event.timeStamp - lastHistoryOpenAt < 1000) return;
+        upwardWheelAtTop = 0;
+        lastHistoryOpenAt = event.timeStamp;
+        event.preventDefault();
+        callbacksRef.current.onHistoryRequested();
+      };
+      containerNode.addEventListener('wheel', onHistoryWheel, { capture: true, passive: false });
+      cleanupDesktopHistoryWheel = () => {
+        containerNode.removeEventListener('wheel', onHistoryWheel, true);
+      };
+
 
       // Custom menu: xterm selection is not a DOM selection, so Chrome's
       // native Copy item is disabled. Handle copy from xterm explicitly.
@@ -321,6 +349,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           menuButton('コピー', 'Ctrl+C', () => { void copyToClipboard(selection); terminal.focus(); }, !selection),
           menuButton('貼り付け', 'Ctrl+V', () => { void pasteClipboard(); }),
           menuButton('すべて選択', 'Ctrl+A', () => { terminal.selectAll(); terminal.focus(); }),
+          ...(callbacksRef.current.onHistoryRequested ? [menuButton('履歴を表示', '', () => callbacksRef.current.onHistoryRequested?.())] : []),
         );
         document.body.appendChild(div);
         const rect = div.getBoundingClientRect();
@@ -616,6 +645,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       cleanupTouch?.();
       cleanupKeyboardViewport?.();
       cleanupContextMenu?.();
+      cleanupDesktopHistoryWheel?.();
       writeGenerationRef.current++;
       writeQueueRef.current = [];
       pendingBytesRef.current = 0;
