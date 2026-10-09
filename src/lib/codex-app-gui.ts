@@ -357,7 +357,7 @@ export class CodexGuiRuntime {
     // Never forward Purplemux's internal MCP or browser-auth credentials to
     // Codex (or SSH). Codex can execute workspace commands, and those child
     // processes inherit the App Server environment.
-    const childEnv = { ...process.env, NO_COLOR: '1' };
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
     for (const key of [
       '__PMUX_MCP_INTERNAL_TOKEN', '__PMUX_MCP_INTERNAL_PORT',
       'NEXTAUTH_SECRET', 'AUTH_PASSWORD', 'CONTROL_PLANE_API_KEY', 'OPENAI_ADMIN_KEY',
