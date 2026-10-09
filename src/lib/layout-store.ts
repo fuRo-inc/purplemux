@@ -198,7 +198,7 @@ export const crossCheckLayout = async (
         log.debug(`crossCheck: agent tab session recreated: ${tab.sessionName} (cwd: ${cwd})`);
         await createSession(tab.sessionName, 80, 24, remoteWorkspace?.hostId ? undefined : cwd);
         if (remoteWorkspace?.hostId) {
-          await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace));
+          await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace, undefined, tab.sessionName));
         }
         changed = true;
       }
@@ -262,7 +262,7 @@ export const getLayout = async (wsId: string, defaultCwd?: string): Promise<ILay
     const workspace = await getWorkspaceById(wsId);
     await createSession(tab.sessionName, 80, 24, workspace?.hostId ? undefined : defaultCwd);
     if (workspace?.hostId) {
-      await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace));
+      await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace, undefined, tab.sessionName));
     }
 
     const layout: ILayoutData = {
@@ -321,7 +321,7 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
           throw new Error('Remote workspace supports Terminal and Codex only');
         }
         await createSession(sessionName, 80, 24, undefined);
-        await sendKeys(sessionName, await buildRemoteShellCommand(workspace, panelType === 'codex-cli' || command === 'remote-codex' ? 'codex' : undefined));
+        await sendKeys(sessionName, await buildRemoteShellCommand(workspace, panelType === 'codex-cli' || command === 'remote-codex' ? 'codex' : undefined, sessionName));
       } else {
         await createSession(sessionName, 80, 24, cwd);
         if (command) {
