@@ -247,7 +247,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         // OSC 52 read는 터미널 앱이 브라우저 클립보드를 훔쳐볼 수 있어 거부한다
         readText: () => '',
         // Ignore OSC 52 clipboard writes from tmux or remote apps.
-        // Only explicit Ctrl+C / Cmd+C should copy selected terminal text.
+        // Only explicit Ctrl+Shift+C / Cmd+C or context-menu actions may copy selected text.
         writeText: async () => {},
       };
       terminal.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
