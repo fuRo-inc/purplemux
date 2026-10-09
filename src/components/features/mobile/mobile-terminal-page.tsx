@@ -199,13 +199,17 @@ const MobileTerminalPage = () => {
         dangerouslySkipPermissions: useConfigStore.getState().dangerouslySkipPermissions,
       });
     } else if (options?.command === 'codex-new') {
-      if (!await ensureAgentInstalled('codex')) return;
-      try {
-        cmd = await fetchCodexLaunchCommand(activeWorkspaceId);
-      } catch {
-        toast.error(t('codexLaunchFailed'));
-        return;
+      const remote = workspaces.some((w) => w.id === activeWorkspaceId && !!w.hostId);
+      if (!remote) {
+        if (!await ensureAgentInstalled('codex')) return;
+        try {
+          cmd = await fetchCodexLaunchCommand(activeWorkspaceId);
+        } catch {
+          toast.error(t('codexLaunchFailed'));
+          return;
+        }
       }
+      // The remote layout backend automatically starts Codex inside tmux.
     }
     const newTab = await layout.createTabInPane(currentPane.id, panelType, cmd, options?.resumeSessionId);
     if (newTab) {
@@ -214,7 +218,7 @@ const MobileTerminalPage = () => {
         useTabStore.getState().setSessionView(newTab.id, 'check');
       }
     }
-  }, [currentPane, ensureAgentInstalled, layout, activeWorkspaceId, t]);
+  }, [currentPane, ensureAgentInstalled, layout, activeWorkspaceId, workspaces, t]);
 
   const handleCloseTab = useCallback(() => {
     if (!currentPane || !selectedTabId) return;
