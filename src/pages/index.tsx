@@ -73,7 +73,12 @@ export const getServerSideProps: GetServerSideProps<IIndexProps> = async (contex
     if (data.workspaces.length === 0) {
       const ws = await createWorkspace(os.homedir());
       data.workspaces.push(ws);
+      data.activeWorkspaceId = ws.id;
     }
+
+    // Next.js getServerSideProps cannot serialize undefined values.
+    // A fresh installation may not have a persisted active workspace yet.
+    data.activeWorkspaceId ??= data.workspaces[0]?.id;
 
     const { authPassword, authSecret: _, ...safeConfig } = configData;
     const hostEnvLocked = typeof process.env.HOST === 'string' && process.env.HOST.trim().length > 0;
