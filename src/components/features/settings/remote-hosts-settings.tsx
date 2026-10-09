@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { IRemoteHost, IRemoteHostInput } from '@/types/remote-host';
+import useWorkspaceStore from '@/hooks/use-workspace-store';
 
 const EMPTY_FORM: IRemoteHostInput = {
   name: '',
@@ -19,6 +20,8 @@ const RemoteHostsSettings = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [remoteDirectories, setRemoteDirectories] = useState<Record<string, string>>({});
+  const [creatingWorkspaceId, setCreatingWorkspaceId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testState, setTestState] = useState<Record<string, { ok: boolean; text: string }>>({});
 
@@ -94,6 +97,31 @@ const RemoteHostsSettings = () => {
       });
     } catch {
       toast.error('Failed to delete remote host');
+    }
+  };
+
+  const createHostWorkspace = async (host: IRemoteHost) => {
+    const remoteDirectory = (remoteDirectories[host.id] ?? '').trim();
+    if (!remoteDirectory.startsWith('/')) {
+      toast.error('Enter an absolute remote directory path');
+      return;
+    }
+    setCreatingWorkspaceId(host.id);
+    try {
+      const res = await fetch('/api/workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: host.name, hostId: host.id, remoteDirectory }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Workspace creation failed');
+      await useWorkspaceStore.getState().fetchWorkspaces();
+      useWorkspaceStore.getState().switchWorkspace(data.id);
+      toast.success('Remote workspace created. Close Settings to use Terminal.');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Workspace creation failed');
+    } finally {
+      setCreatingWorkspaceId(null);
     }
   };
 
@@ -211,7 +239,8 @@ const RemoteHostsSettings = () => {
                   </div>
                 )}
               </div>
-              <div className="flex shrink-0 gap-1.5">
+              <div className="flex shrink-0 flex-col gap-1.5">
+                <div className="flex gap-1.5">
                 <Button variant="outline" size="sm" onClick={() => void testHost(host)} disabled={testingId === host.id}>
                   {testingId === host.id && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                   Test SSH
@@ -227,6 +256,16 @@ const RemoteHostsSettings = () => {
                   aria-label="Delete host"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+                </div>
+                <Input
+                  className="h-8 min-w-48 text-xs"
+                  placeholder="/home/user/project"
+                  value={remoteDirectories[host.id] ?? ''}
+                  onChange={(e) => setRemoteDirectories((previous) => ({ ...previous, [host.id]: e.target.value }))}
+                />
+                <Button variant="outline" size="sm" onClick={() => void createHostWorkspace(host)} disabled={creatingWorkspaceId === host.id}>
+                  {creatingWorkspaceId === host.id ? 'Creating...' : 'Create remote workspace'}
                 </Button>
               </div>
             </div>
