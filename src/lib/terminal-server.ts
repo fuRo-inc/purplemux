@@ -30,7 +30,7 @@ const HEARTBEAT_TIMEOUT = 90_000;
 const OUTPUT_WINDOW_MS = 1000;
 const MAX_OUTPUT_BYTES_PER_WINDOW = 128 * 1024;
 const MAX_THROTTLE_BUFFER_CHARS = 128 * 1024;
-const OUTPUT_SKIPPED_NOTICE = '\\r\\n[Purplemux] High-volume terminal output was truncated. Use less/tail for large files.\\r\\n';
+const OUTPUT_SKIPPED_NOTICE = '\r\n[Purplemux] High-volume terminal output was truncated. Use less/tail for large files.\r\n';
 
 const BACKPRESSURE_HIGH = 1024 * 1024;
 const BACKPRESSURE_LOW = 256 * 1024;
