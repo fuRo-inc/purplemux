@@ -406,7 +406,7 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
         await bridge.shutdown();
         await originalShutdown();
       };
-      log.info(`Read-only MCP bridge enabled on 127.0.0.1:${bridge.port}`);
+      log.info(`MCP bridge enabled on 127.0.0.1:${bridge.port} (Codex task writes: ${process.env.PURPLEMUX_MCP_ALLOW_WRITES === '1' ? 'enabled' : 'disabled'})`);
     } catch (error) {
       await result.shutdown();
       throw error;
