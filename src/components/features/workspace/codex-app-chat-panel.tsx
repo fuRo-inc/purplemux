@@ -65,7 +65,8 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
 
   const model = useMemo(() => state.models.find((m) => m.model === selectedModel), [state.models, selectedModel]);
   const effortOptions = model?.supportedReasoningEfforts ?? [];
-  const fastAvailable = model?.serviceTiers?.some((tier) => tier.id === 'fast') ?? false;
+  // The Codex catalog may use the legacy "priority" ID for Fast.
+  const fastAvailable = model?.serviceTiers?.some((tier) => tier.id === 'fast' || tier.id === 'priority') ?? false;
   const isNearBottomRef = useRef(true);
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
