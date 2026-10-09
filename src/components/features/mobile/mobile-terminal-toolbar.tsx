@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Copy, ClipboardPaste, Keyboard } from 'lucide-react';
+import { Copy, ClipboardPaste, History, Keyboard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { CTRL_TOGGLE, SHIFT_TOGGLE, TERMINAL_KEYS, toCtrlChar, type IKeyDef } from '@/lib/terminal-keys';
 
@@ -8,9 +8,10 @@ interface IMobileTerminalToolbarProps {
   terminalConnected: boolean;
   onCopy: () => void;
   onFocusTerminal: () => void;
+  onHistory: () => void;
 }
 
-export default function MobileTerminalToolbar({ sendStdin, terminalConnected, onCopy, onFocusTerminal }: IMobileTerminalToolbarProps) {
+export default function MobileTerminalToolbar({ sendStdin, terminalConnected, onCopy, onFocusTerminal, onHistory }: IMobileTerminalToolbarProps) {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
   const [ctrlActive, setCtrlActive] = useState(false);
@@ -47,6 +48,9 @@ export default function MobileTerminalToolbar({ sendStdin, terminalConnected, on
         </Button>
         <Button size="sm" variant="outline" disabled={!terminalConnected} onClick={() => setPasteOpen((value) => !value)} className="gap-1">
           <ClipboardPaste size={14} /> 貼り付け
+        </Button>
+        <Button size="sm" variant="outline" disabled={!terminalConnected} onClick={onHistory} className="gap-1 px-2">
+          <History size={14} /> 履歴
         </Button>
       </div>
       {pasteOpen && (
