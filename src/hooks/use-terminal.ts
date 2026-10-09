@@ -247,7 +247,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         // OSC 52 read는 터미널 앱이 브라우저 클립보드를 훔쳐볼 수 있어 거부한다
         readText: () => '',
         // Ignore OSC 52 clipboard writes from tmux or remote apps.
-        // Only explicit Ctrl+Shift+C / Cmd+C or context-menu actions may copy selected text.
+        // Only explicit Ctrl+C (when text selected), Ctrl+Shift+C, Cmd+C, or menu may copy.
         writeText: async () => {},
       };
       terminal.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
@@ -281,12 +281,22 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       };
 
 
-      // Custom menu: xterm selection is not a DOM selection, so Chrome's
-      // native Copy item is disabled. Handle copy from xterm explicitly.
+      // The browser exposes the clipboard through a trusted paste event even
+      // when navigator.clipboard.readText is unavailable on HTTP/Tailscale IPs.
+      // Handle that event directly, without a separate paste input or dialog.
+      const onNativePaste = (event: ClipboardEvent) => {
+        const text = event.clipboardData?.getData('text/plain');
+        if (!text) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        terminal.paste(text); // xterm handles line endings and bracketed paste.
+      };
+      containerNode.addEventListener('paste', onNativePaste, true);
+
+      // Browser-native right-click Copy is disabled on xterm canvas selections.
+      // Keep a small terminal menu, but never interrupt typing with a modal.
       let menu: HTMLDivElement | null = null;
-      let pastePrompt: HTMLTextAreaElement | null = null;
       const closeMenu = () => { menu?.remove(); menu = null; };
-      const closePastePrompt = () => { pastePrompt?.remove(); pastePrompt = null; };
       const menuButton = (label: string, shortcut: string, handler: () => void, disabled = false) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -304,36 +314,25 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         button.onclick = (event) => { event.stopPropagation(); closeMenu(); handler(); };
         return button;
       };
-      const showPastePrompt = () => {
-        closePastePrompt();
-        const textarea = document.createElement('textarea');
-        pastePrompt = textarea;
-        textarea.placeholder = 'Ctrl+V で貼り付け（Esc で閉じる）';
-        textarea.setAttribute('aria-label', 'Paste into terminal');
-        textarea.style.cssText = 'position:fixed;z-index:2147483647;top:40%;left:35%;width:30%;min-width:260px;min-height:80px;padding:12px;background:#202024;color:white;border:1px solid #777;border-radius:6px;font:14px sans-serif;';
-        textarea.addEventListener('paste', (event) => {
-          const value = event.clipboardData?.getData('text/plain');
-          if (value) {
-            event.preventDefault();
-            callbacksRef.current.onInput?.(value.replace(/\r?\n/g, '\r'));
-            closePastePrompt();
-            terminal.focus();
-          }
-        });
-        textarea.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape') { event.preventDefault(); closePastePrompt(); terminal.focus(); }
-        });
-        document.body.appendChild(textarea);
-        textarea.focus();
-      };
       const pasteClipboard = async () => {
+        // Direct reads require a secure context. On HTTP, the OS/browser still
+        // supports Ctrl+V via the trusted paste event handled above.
+        terminal.focus();
+        if (!window.isSecureContext || !navigator.clipboard?.readText) {
+          toast.info('貼り付けは Ctrl+V（Mac: Cmd+V）を使用してください。HTTPでは右クリックからの直接貼り付けに制限があります。', {
+            id: 'terminal-paste-tip',
+          });
+          return;
+        }
         try {
-          if (!navigator.clipboard?.readText) { showPastePrompt(); return; }
           const text = await navigator.clipboard.readText();
-          if (text) callbacksRef.current.onInput?.(text.replace(/\r?\n/g, '\r'));
-          terminal.focus();
+          if (text) terminal.paste(text);
         } catch {
-          showPastePrompt();
+          toast.info('ブラウザのクリップボード読み取りが許可されていません。Ctrl+V で貼り付けてください。', {
+            id: 'terminal-paste-tip',
+          });
+        } finally {
+          terminal.focus();
         }
       };
       const showMenu = (event: MouseEvent) => {
@@ -346,7 +345,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         div.style.cssText = 'position:fixed;z-index:2147483647;min-width:250px;padding:5px 0;border:1px solid #494949;border-radius:9px;background:#252525;color:#f5f5f5;box-shadow:0 12px 30px #0008;';
         const selection = terminal.getSelection();
         div.append(
-          menuButton('コピー', 'Ctrl+Shift+C', () => { void copyToClipboard(selection); terminal.focus(); }, !selection),
+          menuButton('コピー', 'Ctrl+C / Ctrl+Shift+C', () => { void copyToClipboard(selection).finally(() => terminal.focus()); }, !selection),
           menuButton('割り込み (SIGINT)', 'Ctrl+C', () => { callbacksRef.current.onInput?.('\x03'); terminal.focus(); }),
           menuButton('貼り付け', 'Ctrl+V', () => { void pasteClipboard(); }),
           menuButton('すべて選択', 'Ctrl+A', () => { terminal.selectAll(); terminal.focus(); }),
@@ -373,7 +372,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       document.addEventListener('keydown', onDocumentKeyDown, true);
       cleanupContextMenu = () => {
         closeMenu();
-        closePastePrompt();
+        containerNode.removeEventListener('paste', onNativePaste, true);
         containerNode.removeEventListener('mousedown', stopRightMouse, true);
         containerNode.removeEventListener('mouseup', stopRightMouse, true);
         containerNode.removeEventListener('contextmenu', showMenu, true);
@@ -397,30 +396,31 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         // IME 조합 단계의 keydown(keyCode 229)은 가로채지 않는다. 같은 키가 조합용으로 한 번,
         // 실제 키로 한 번 들어오므로 실제 키만 처리해 중복 전송(단어 2칸 이동 등)을 막는다.
         if (event.isComposing || event.keyCode === 229) return true;
-        // Terminal convention: Ctrl+C always interrupts the foreground
-        // process (including through SSH/tmux). Ctrl+Shift+C copies an xterm
-        // selection; Cmd+C remains copy on macOS. The right-click copy action
-        // continues to work on Windows and mobile.
+        // Ctrl+C is contextual: copy a selected range, otherwise send SIGINT
+        // to the local/SSH process. Ctrl+Shift+C always means Copy (if selected).
+        // To interrupt with text still selected, clear it with Escape first,
+        // or choose SIGINT from the right-click menu.
         const key = event.key.toLowerCase();
         if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && key === 'c') {
           event.preventDefault();
-          if (event.shiftKey) {
-            if (terminal.hasSelection()) void copyToClipboard(terminal.getSelection());
-          } else {
+          if (terminal.hasSelection()) {
+            void copyToClipboard(terminal.getSelection()).finally(() => terminal.focus());
+          } else if (!event.shiftKey) {
             callbacksRef.current.onInput?.('\x03');
           }
           return false;
         }
         if (event.type === 'keydown' && event.metaKey && !event.ctrlKey && key === 'c') {
           event.preventDefault();
-          if (terminal.hasSelection()) void copyToClipboard(terminal.getSelection());
+          if (terminal.hasSelection()) void copyToClipboard(terminal.getSelection()).finally(() => terminal.focus());
           return false;
         }
-        // Ctrl+V / Cmd+V use native browser paste into xterm's hidden textarea.
-        // Keeping the paste event native avoids asynchronous clipboard permission prompts.
-        if (event.type === 'keydown' && ((event.ctrlKey && !event.shiftKey && key === 'v') ||
-          (event.ctrlKey && event.shiftKey && key === 'v') || (event.metaKey && key === 'v'))) {
-          return true;
+        // Don't let xterm consume the shortcut: allow the browser to emit its
+        // trusted paste event, captured by onNativePaste above.
+        if (event.type === 'keydown' && !event.altKey &&
+            ((event.ctrlKey && !event.metaKey && key === 'v') ||
+             (event.metaKey && !event.ctrlKey && key === 'v'))) {
+          return false;
         }
         // macOptionIsMeta가 이중 ESC를 보내는 키만 직접 매핑
         if (event.altKey && event.type === 'keydown') {
