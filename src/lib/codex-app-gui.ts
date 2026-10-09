@@ -46,6 +46,16 @@ const isFastTier = (id: string): boolean => id === 'fast' || id === 'priority';
 const THREAD_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 export type CodexGuiSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+// thread/start and thread/resume use kebab-case SandboxMode.
+// Only sandboxPolicy.type (thread/settings/update) uses camelCase SandboxPolicy.
+type CodexAppSandboxPolicyType = 'readOnly' | 'workspaceWrite' | 'dangerFullAccess';
+const CODEX_APP_SANDBOX_POLICY_TYPES: Record<CodexGuiSandbox, CodexAppSandboxPolicyType> = {
+  'read-only': 'readOnly',
+  'workspace-write': 'workspaceWrite',
+  'danger-full-access': 'dangerFullAccess',
+};
+const toCodexAppSandboxPolicyType = (mode: CodexGuiSandbox): CodexAppSandboxPolicyType =>
+  CODEX_APP_SANDBOX_POLICY_TYPES[mode];
 export type CodexGuiApprovalPolicy = 'on-request' | 'never';
 export type CodexGuiState = {
   ready: boolean;
@@ -693,7 +703,7 @@ export class CodexGuiRuntime {
           (previous.sandboxMode !== this.state.sandboxMode || previous.approvalPolicy !== this.state.approvalPolicy)) {
         await this.request('thread/settings/update', {
           threadId: this.state.threadId,
-          sandboxPolicy: { type: this.state.sandboxMode },
+          sandboxPolicy: { type: toCodexAppSandboxPolicyType(this.state.sandboxMode) },
           approvalPolicy: this.state.approvalPolicy,
         }, 30000);
       }
