@@ -199,6 +199,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     let reFitTimer = 0;
     let resizeObserver: ResizeObserver | null = null;
     let cleanupTouch: (() => void) | null = null;
+    let cleanupContextMenu: (() => void) | null = null;
 
     loadFonts().then(() => {
       if (disposed) return;
@@ -247,6 +248,11 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       terminal.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
 
       terminal.open(containerNode);
+
+      // Prevent the browser context menu from overlapping tmux's mouse menu.
+      const suppressBrowserContextMenu = (event: MouseEvent) => event.preventDefault();
+      containerNode.addEventListener('contextmenu', suppressBrowserContextMenu);
+      cleanupContextMenu = () => containerNode.removeEventListener('contextmenu', suppressBrowserContextMenu);
 
       terminalInstance.current = terminal;
       fitAddonRef.current = fitAddon;
@@ -376,6 +382,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       clearTimeout(reFitTimer);
       resizeObserver?.disconnect();
       cleanupTouch?.();
+      cleanupContextMenu?.();
       writeGenerationRef.current++;
       writeQueueRef.current = [];
       pendingBytesRef.current = 0;
