@@ -31,7 +31,10 @@ export default function TerminalHistoryViewer({
     if (scroller && content !== null) {
       // Opening from the live terminal should initially show the newest lines.
       requestAnimationFrame(() => {
-        if (scrollRef.current === scroller) scroller.scrollTop = scroller.scrollHeight;
+        if (scrollRef.current === scroller) {
+          scroller.scrollTop = scroller.scrollHeight;
+          scroller.focus({ preventScroll: true });
+        }
       });
     }
   }, [content]);
@@ -52,6 +55,17 @@ export default function TerminalHistoryViewer({
     document.addEventListener('selectionchange', updateSelection);
     return () => document.removeEventListener('selectionchange', updateSelection);
   }, []);
+
+  useEffect(() => {
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', onEscape, true);
+    return () => document.removeEventListener('keydown', onEscape, true);
+  }, [onClose]);
 
   const copySelection = useCallback(async () => {
     if (!selectedText) return;
@@ -83,6 +97,8 @@ export default function TerminalHistoryViewer({
       {content !== null && !loading && (
         <div
           ref={scrollRef}
+          tabIndex={0}
+          aria-label="ターミナル履歴（テキストをドラッグしてコピー）"
           data-mobile-terminal-scroll
           className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 py-1"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y', userSelect: 'text', WebkitUserSelect: 'text' }}
