@@ -346,7 +346,8 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         div.style.cssText = 'position:fixed;z-index:2147483647;min-width:250px;padding:5px 0;border:1px solid #494949;border-radius:9px;background:#252525;color:#f5f5f5;box-shadow:0 12px 30px #0008;';
         const selection = terminal.getSelection();
         div.append(
-          menuButton('コピー', 'Ctrl+C', () => { void copyToClipboard(selection); terminal.focus(); }, !selection),
+          menuButton('コピー', 'Ctrl+Shift+C', () => { void copyToClipboard(selection); terminal.focus(); }, !selection),
+          menuButton('割り込み (SIGINT)', 'Ctrl+C', () => { callbacksRef.current.onInput?.('\x03'); terminal.focus(); }),
           menuButton('貼り付け', 'Ctrl+V', () => { void pasteClipboard(); }),
           menuButton('すべて選択', 'Ctrl+A', () => { terminal.selectAll(); terminal.focus(); }),
           ...(callbacksRef.current.onHistoryRequested ? [menuButton('履歴を表示', '', () => callbacksRef.current.onHistoryRequested?.())] : []),
@@ -396,15 +397,17 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         // IME 조합 단계의 keydown(keyCode 229)은 가로채지 않는다. 같은 키가 조합용으로 한 번,
         // 실제 키로 한 번 들어오므로 실제 키만 처리해 중복 전송(단어 2칸 이동 등)을 막는다.
         if (event.isComposing || event.keyCode === 229) return true;
-        // Windows-style shortcuts: Ctrl+C copies instead of sending SIGINT.
-        // Ctrl+Shift+C explicitly sends SIGINT to the foreground remote process.
+        // Terminal convention: Ctrl+C always interrupts the foreground
+        // process (including through SSH/tmux). Ctrl+Shift+C copies an xterm
+        // selection; Cmd+C remains copy on macOS. The right-click copy action
+        // continues to work on Windows and mobile.
         const key = event.key.toLowerCase();
         if (event.type === 'keydown' && event.ctrlKey && !event.altKey && !event.metaKey && key === 'c') {
           event.preventDefault();
           if (event.shiftKey) {
+            if (terminal.hasSelection()) void copyToClipboard(terminal.getSelection());
+          } else {
             callbacksRef.current.onInput?.('\x03');
-          } else if (terminal.hasSelection()) {
-            void copyToClipboard(terminal.getSelection());
           }
           return false;
         }
