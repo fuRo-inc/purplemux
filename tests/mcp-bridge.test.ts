@@ -63,6 +63,30 @@ describe('Purplemux read-only MCP bridge', () => {
     expect(tool?.error?.code).toBe(-32602);
   });
 
+  it('adds mandatory resultType for modern tools/list and tools/call', async () => {
+    const metadata = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {},
+    };
+    const list = await dispatchMcpRequest({
+      jsonrpc: '2.0', id: 7, method: 'tools/list', params: { _meta: metadata },
+    }, '2026-07-28');
+    expect(list?.result).toMatchObject({ resultType: 'complete', tools: expect.any(Array) });
+    const call = await dispatchMcpRequest({
+      jsonrpc: '2.0', id: 8, method: 'tools/call',
+      params: { _meta: metadata, name: 'list_hosts', arguments: {} },
+    }, '2026-07-28');
+    expect(call?.result).toMatchObject({ resultType: 'complete', isError: false });
+  });
+
+  it('rejects contradictory HTTP and JSON-RPC protocol versions', async () => {
+    const response = await dispatchMcpRequest({
+      jsonrpc: '2.0', id: 9, method: 'tools/list',
+      params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2025-11-25' } },
+    }, '2026-07-28');
+    expect(response?.error?.code).toBe(-32600);
+  });
+
   it('does not respond to client notifications', async () => {
     const response = await dispatchMcpRequest({ jsonrpc: '2.0', method: 'notifications/initialized' });
     expect(response).toBeNull();
