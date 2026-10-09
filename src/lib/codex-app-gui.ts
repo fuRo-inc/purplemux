@@ -3,6 +3,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import { promises as fs } from 'fs';
+import { randomUUID } from 'crypto';
 import { getRemoteHost } from '@/lib/remote-host-store';
 import type { IWorkspace, ITab } from '@/types/terminal';
 
@@ -114,7 +115,7 @@ export class CodexGuiRuntime {
   private async store(): Promise<void> {
     await fs.mkdir(RETAINED_DIR, { recursive: true, mode: 0o700 });
     const filename = this.sessionFile();
-    const temporary = filename + '.' + process.pid + '.tmp';
+    const temporary = filename + '.' + randomUUID() + '.tmp';
     await fs.writeFile(temporary, JSON.stringify({
       threadId: this.state.threadId, model: this.state.model, effort: this.state.effort,
     }), { encoding: 'utf8', mode: 0o600 });
@@ -437,23 +438,26 @@ export class CodexGuiRuntime {
       const text = (args.text || '').trim();
       if (!text || text.length > 100000) throw new Error('Message must be 1–100000 characters');
       if (this.state.busy) throw new Error('Codex is already running a turn');
-      this.state.error = null;
-      if (!this.state.threadId) {
-        const cwd = this.workspace.hostId ? this.workspace.remoteDirectory : this.tab.cwd || this.workspace.directories[0];
-        const result = await this.request('thread/start', {
-          cwd, approvalPolicy: 'on-request', sandbox: 'workspace-write',
-          ...(this.state.model ? { model: this.state.model } : {}),
-        }, 45000);
-        const id = asString(asRecord(result.thread).id);
-        if (!id) throw new Error('Codex did not return a thread ID');
-        this.state.threadId = id;
-        await this.store();
-      }
-      this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
-      if (this.state.items.length > MAX_ITEMS) this.state.items.shift();
+      // Lock before async thread/start so simultaneous desktop/mobile requests
+      // cannot both create a new thread for the same tab.
       this.state.busy = true;
+      this.state.error = null;
       this.publish();
       try {
+        if (!this.state.threadId) {
+          const cwd = this.workspace.hostId ? this.workspace.remoteDirectory : this.tab.cwd || this.workspace.directories[0];
+          const result = await this.request('thread/start', {
+            cwd, approvalPolicy: 'on-request', sandbox: 'workspace-write',
+            ...(this.state.model ? { model: this.state.model } : {}),
+          }, 45000);
+          const id = asString(asRecord(result.thread).id);
+          if (!id) throw new Error('Codex did not return a thread ID');
+          this.state.threadId = id;
+          await this.store();
+        }
+        this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
+        if (this.state.items.length > MAX_ITEMS) this.state.items.shift();
+        this.publish();
         const response = await this.request('turn/start', {
           threadId: this.state.threadId,
           input: [{ type: 'text', text, text_elements: [] }],
