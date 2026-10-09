@@ -148,7 +148,7 @@ const MobileTabHeader = ({
 
   const renderTabIcon = () => {
     if (panelType === 'claude-code') return <ClaudeCodeIcon size={16} />;
-    if (panelType === 'codex-cli') return <OpenAIIcon size={16} className="shrink-0 text-foreground" aria-label="Codex" />;
+    if (panelType === 'codex-cli' || panelType === 'codex-chat') return <OpenAIIcon size={16} className="shrink-0 text-foreground" aria-label="Codex" />;
     if (panelType === 'diff') return <GitCompareArrows className={cn(iconClassName, 'text-muted-foreground')} />;
     if (panelType === 'agent-sessions') return <History className={cn(iconClassName, 'text-muted-foreground')} />;
     return (
