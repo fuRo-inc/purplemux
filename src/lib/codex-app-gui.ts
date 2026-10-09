@@ -255,6 +255,11 @@ export class CodexGuiRuntime {
     if (method) this.handleNotification(method, asRecord(message.params));
   }
 
+  terminate(): void {
+    this.child?.kill();
+    this.exit('Codex App Server terminated');
+  }
+
   async start(): Promise<void> {
     if (!KEY_RE.test(this.workspace.id) || !KEY_RE.test(this.tab.id)) {
       throw new Error('Invalid workspace or tab identifier');
@@ -317,13 +322,25 @@ export class CodexGuiRuntime {
             })),
         };
       }).filter((model) => model.model);
+      if (this.state.model && !this.state.models.some((item) => item.model === this.state.model)) {
+        this.state.model = null;
+        this.state.effort = null;
+        await this.store();
+      }
     } catch (error) {
       this.state.error = 'モデル一覧を取得できません: ' + (error instanceof Error ? error.message : String(error));
     }
     if (this.state.threadId) {
       try {
         const result = await this.request('thread/resume', { threadId: this.state.threadId }, 40000);
-        this.restore(asRecord(result.thread));
+        // thread/resume may return a summary rather than all messages.
+        // Recover the transcript explicitly from the durable local/remote thread.
+        try {
+          const history = await this.request('thread/read', { threadId: this.state.threadId, includeTurns: true }, 35000);
+          this.restore(asRecord(history.thread));
+        } catch {
+          this.restore(asRecord(result.thread));
+        }
       } catch (error) {
         this.state.error = '以前の会話を再開できません: ' + (error instanceof Error ? error.message : String(error));
         this.state.threadId = null;
@@ -439,7 +456,7 @@ export class CodexGuiRuntime {
       try {
         const response = await this.request('turn/start', {
           threadId: this.state.threadId,
-          input: [{ type: 'text', text }],
+          input: [{ type: 'text', text, text_elements: [] }],
           ...(this.state.model ? { model: this.state.model } : {}),
           ...(this.state.effort ? { effort: this.state.effort } : {}),
         }, 45000);
@@ -467,8 +484,13 @@ export const getCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Prom
   if (runtimes.size >= 36) throw new Error('Too many Codex App Server sessions');
   const pending = (async () => {
     const runtime = new CodexGuiRuntime(workspace, tab);
-    await runtime.start();
-    return runtime;
+    try {
+      await runtime.start();
+      return runtime;
+    } catch (error) {
+      runtime.terminate();
+      throw error;
+    }
   })();
   runtimes.set(key, pending);
   try { return await pending; } catch (error) {
