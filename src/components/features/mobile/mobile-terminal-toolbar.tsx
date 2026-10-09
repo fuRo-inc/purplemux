@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, type ChangeEvent } from 'react';
-import { SendHorizontal } from 'lucide-react';
+import { SendHorizontal, Copy, ClipboardPaste } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,7 @@ import { CTRL_TOGGLE, SHIFT_TOGGLE, TERMINAL_KEYS, toCtrlChar, type IKeyDef } fr
 interface IMobileTerminalToolbarProps {
   sendStdin: (data: string) => void;
   terminalConnected: boolean;
+  onCopy: () => void;
 }
 
 const LINE_HEIGHT = 20;
@@ -17,10 +18,12 @@ const NERD_FONT_STYLE = { fontFamily: 'MesloLGLDZ, monospace' } as const;
 
 const KEYS = TERMINAL_KEYS;
 
-const MobileTerminalToolbar = ({ sendStdin, terminalConnected }: IMobileTerminalToolbarProps) => {
+const MobileTerminalToolbar = ({ sendStdin, terminalConnected, onCopy }: IMobileTerminalToolbarProps) => {
   const t = useTranslations('mobile');
   const [value, setValue] = useState('');
   const [ctrlActive, setCtrlActive] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
   const [shiftActive, setShiftActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -85,8 +88,35 @@ const MobileTerminalToolbar = ({ sendStdin, terminalConnected }: IMobileTerminal
     [ctrlActive, shiftActive, sendStdin],
   );
 
+  const submitPaste = () => {
+    if (!terminalConnected || !pasteText) return;
+    sendStdin(pasteText.replace(/\\r?\\n/g, '\\r'));
+    setPasteText('');
+    setPasteOpen(false);
+  };
+
   return (
     <div className="shrink-0 border-t border-border bg-background">
+      <div className="flex items-center gap-2 px-3 pt-2">
+        <Button variant="outline" size="sm" onClick={onCopy} className="gap-1">
+          <Copy size={14} /> 表示をコピー
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => setPasteOpen((prev) => !prev)} className="gap-1" disabled={!terminalConnected}>
+          <ClipboardPaste size={14} /> 貼り付け
+        </Button>
+      </div>
+      {pasteOpen && (
+        <div className="flex items-end gap-2 px-3 pt-2">
+          <textarea
+            aria-label="貼り付けるテキスト"
+            className="min-h-16 flex-1 resize-y rounded-md border bg-background p-2 text-sm"
+            placeholder="ここを長押しして「ペースト」を選択"
+            value={pasteText}
+            onChange={(event) => setPasteText(event.target.value)}
+          />
+          <Button size="sm" disabled={!terminalConnected || !pasteText} onClick={submitPaste}>送信</Button>
+        </div>
+      )}
       <div className="flex items-end gap-2 px-3 py-2">
         <textarea
           ref={textareaRef}
