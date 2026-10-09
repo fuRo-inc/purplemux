@@ -14,6 +14,7 @@ interface ICodexAppChatPanelProps {
 
 const DEFAULT_STATE: CodexGuiState = {
   ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
+  lastTurnId: null, lastTurnStatus: null,
   model: null, effort: null, sandboxMode: 'workspace-write', approvalPolicy: 'on-request',
   fastMode: false, models: [], items: [], approvals: [], error: null,
 };
