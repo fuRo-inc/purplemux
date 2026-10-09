@@ -524,7 +524,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             const first = Math.min(a, b);
             terminal.select(first % terminal.cols, Math.floor(first / terminal.cols), Math.max(1, Math.abs(b - a) + 1));
           }
-          selectionRaf = window.setTimeout(autoScrollSelection, 55) as unknown as number;
+          selectionRaf = window.setTimeout(autoScrollSelection, 55);
         };
         let lastSelectionCol = 0;
         const onTouchStart = (event: TouchEvent) => {
@@ -544,7 +544,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             selecting = true;
             startCell = toCell(touch);
             updateSelection(touch);
-            selectionRaf = requestAnimationFrame(autoScrollSelection);
+            selectionRaf = window.setTimeout(autoScrollSelection, 55);
           }, 450);
         };
         const onTouchMove = (event: TouchEvent) => {
