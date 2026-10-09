@@ -13,10 +13,7 @@ import { useLayoutStore } from '@/hooks/use-layout';
 import useIsMobile from '@/hooks/use-is-mobile';
 import useIsMac from '@/hooks/use-is-mac';
 import { buildClaudeLaunchCommand } from '@/lib/providers/claude/client';
-import { fetchCodexLaunchCommand } from '@/lib/providers/codex/client';
-import { notifyCodexLaunchFailed } from '@/lib/codex-notifications';
 import useConfigStore from '@/hooks/use-config-store';
-import useWorkspaceStore from '@/hooks/use-workspace-store';
 import { useAgentInstallCheck } from '@/hooks/use-agent-install-check';
 
 interface IPaneNewTabMenuProps {
@@ -26,27 +23,12 @@ interface IPaneNewTabMenuProps {
   onCreateTab: (panelType?: TPanelType, options?: { command?: string; resumeSessionId?: string }) => void;
 }
 
-const useCodexI18n = () => {
-  const t = useTranslations('terminal');
-  return {
-    notInstalled: t('codexNotInstalled'),
-    copyCommand: t('codexCopyCommand'),
-    copied: t('codexCopied'),
-    copyConfigPath: t('codexCopyConfigPath'),
-    configParseFailed: t('codexConfigParseFailed'),
-    launchFailed: t('codexLaunchFailed'),
-    resumeFailed: t('codexResumeFailed'),
-    approvalSendFailed: t('codexApprovalSendFailed'),
-    approvalNotApplied: t('codexApprovalNotApplied'),
-    retry: t('codexRetry'),
-  };
-};
-
 const defaultKeyForPanelType = (panelType?: TPanelType): string => {
   switch (panelType) {
     case 'terminal': return 'terminal';
     case 'web-browser': return 'web-browser';
-    case 'codex-cli': return 'codex';
+    case 'codex-cli':
+    case 'codex-chat': return 'codex';
     case 'agent-sessions': return 'agent-sessions';
     case 'diff':
     case 'claude-code':
@@ -61,13 +43,12 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
   const [open, setOpen] = useState(false);
   const isMobile = useIsMobile();
   const wsId = useLayoutStore((s) => s.workspaceId);
-  const codexI18n = useCodexI18n();
   const { ensureAgentInstalled, installDialogs } = useAgentInstallCheck();
 
   const menuItems = useMemo(() => {
     const all = [
       { key: 'claude', type: 'claude-code' as const, icon: <ClaudeCodeIcon className="h-3.5 w-3.5" />, label: t('claudeNewConversation'), startAgent: 'claude' as const },
-      { key: 'codex', type: 'codex-cli' as const, icon: <OpenAIIcon className="h-3.5 w-3.5" />, label: t('codexNewConversation'), startAgent: 'codex' as const },
+      { key: 'codex', type: 'codex-chat' as const, icon: <OpenAIIcon className="h-3.5 w-3.5" />, label: t('codexNewConversation'), startAgent: 'codex' as const },
       { key: 'agent-sessions', type: 'agent-sessions' as const, icon: <History className="h-3.5 w-3.5 text-muted-foreground" />, label: t('sessionList') },
       { key: 'terminal', type: 'terminal' as const, icon: <ProcessIcon className="h-3.5 w-3.5 text-muted-foreground" />, label: 'Terminal' },
       { key: 'web-browser', type: 'web-browser' as const, icon: <Globe className="h-3.5 w-3.5 text-muted-foreground" />, label: 'Web Browser' },
@@ -105,20 +86,10 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
     itemRefs.current[activeIndex]?.focus();
   }, [open, activeIndex]);
 
-  const launchCodexNewConversation = useCallback(async () => {
-    const workspace = useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId);
-    if (workspace?.hostId) {
-      onCreateTab('terminal', { command: 'remote-codex' });
-      return;
-    }
-    if (!await ensureAgentInstalled('codex')) return;
-    try {
-      const cmd = await fetchCodexLaunchCommand(wsId);
-      onCreateTab('codex-cli', { command: cmd });
-    } catch {
-      notifyCodexLaunchFailed(codexI18n);
-    }
-  }, [codexI18n, ensureAgentInstalled, onCreateTab, wsId]);
+  const launchCodexNewConversation = useCallback(() => {
+    // App Server Chat is host-agnostic; the backend resolves Local / SSH.
+    onCreateTab('codex-chat');
+  }, [onCreateTab]);
 
   const handleStartAgent = useCallback(async (agent: 'claude' | 'codex') => {
     setOpen(false);
