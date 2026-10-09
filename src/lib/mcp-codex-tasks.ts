@@ -364,6 +364,11 @@ export const respondCodexApproval = async (args: Record<string, unknown>) => {
   await refresh(record);
   if (isFinal(record.status) || !record.threadId) return fail('Task is not active');
   if (args.decision !== 'accept' && args.decision !== 'decline') return fail('Invalid approval decision');
+  // Accepting an escalation or file modification is a higher-trust operation
+  // than assigning ordinary sandboxed work. Require a separate operator opt-in.
+  if (args.decision === 'accept' && process.env.PURPLEMUX_MCP_ALLOW_APPROVALS !== '1') {
+    return fail('MCP approval acceptance is disabled. Set PURPLEMUX_MCP_ALLOW_APPROVALS=1 only after operator review.');
+  }
   if (args.confirmApproval !== true) return fail('Explicit confirmApproval=true is required');
   if ((typeof args.requestId !== 'number' && typeof args.requestId !== 'string') ||
       String(args.requestId).length > 128) return fail('Invalid approval requestId');
