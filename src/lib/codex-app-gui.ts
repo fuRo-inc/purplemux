@@ -41,7 +41,7 @@ export type CodexGuiState = {
 
 const sessions = globalThis as unknown as { __purplemuxCodexApps?: Map<string, Promise<CodexGuiRuntime>> };
 if (!sessions.__purplemuxCodexApps) sessions.__purplemuxCodexApps = new Map();
-const runtimes = sessions.__purplemuxCodexApps;
+const runtimes = sessions.__purplemuxCodexApps!;
 const KEY_RE = /^[a-zA-Z0-9_-]{1,120}$/;
 const MAX_ITEMS = 160;
 const MAX_TEXT = 48000;
