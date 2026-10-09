@@ -464,7 +464,7 @@ export class CodexGuiRuntime {
         const status = thread.status;
         const item: CodexGuiSessionSummary = {
           id,
-          preview: asString(thread.preview).slice(0, 600),
+          preview: asString(thread.preview).slice(0, 2400),
           cwd: asString(thread.cwd),
           createdAt: typeof thread.createdAt === 'number' ? thread.createdAt : 0,
           updatedAt: typeof thread.updatedAt === 'number' ? thread.updatedAt : 0,
