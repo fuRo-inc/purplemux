@@ -2,6 +2,7 @@ import type { TPanelType } from '@/types/terminal';
 
 export const defaultTabNameForPanelType = (panelType?: TPanelType): string => {
   if (panelType === 'web-browser') return 'Web Browser';
+  if (panelType === 'codex-chat') return 'Codex Chat';
   return '';
 };
 
