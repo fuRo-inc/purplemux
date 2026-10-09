@@ -175,7 +175,8 @@ export default function CodexSessionPicker({
       const element = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-session-id]') ?? [])
         .find((node) => node.dataset.sessionId === id);
       element?.scrollIntoView({ block: 'nearest' });
-    } else if (event.key === 'Enter' && activeId) {
+      element?.focus({ preventScroll: true });
+    } else if (event.key === 'Enter' && activeId && event.target === event.currentTarget) {
       event.preventDefault();
       const row = visibleRows.find((session) => session.id === activeId);
       if (row) void selectSession(row);
