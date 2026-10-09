@@ -776,15 +776,19 @@ export const getCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Prom
  * Observe an already-running App Server without starting Codex, attaching a
  * new thread or modifying the workspace. Used only by the read-only MCP bridge.
  */
+export const getLoadedCodexGuiRuntime = async (
+  workspaceId: string,
+  tabId: string,
+): Promise<CodexGuiRuntime | null> => {
+  const pending = runtimes.get(workspaceId + ':' + tabId);
+  if (!pending) return null;
+  try { return await pending; } catch { return null; }
+};
+
 export const peekCodexGuiRuntime = async (
   workspaceId: string,
   tabId: string,
 ): Promise<CodexGuiState | null> => {
-  const pending = runtimes.get(workspaceId + ':' + tabId);
-  if (!pending) return null;
-  try {
-    return (await pending).snapshot();
-  } catch {
-    return null;
-  }
+  const runtime = await getLoadedCodexGuiRuntime(workspaceId, tabId);
+  return runtime ? runtime.snapshot() : null;
 };
