@@ -716,6 +716,37 @@ const MobileSurfaceView = ({
     }).catch(() => {});
   }, [activeTabId, paneId, layoutWsId]);
 
+  // Keep the terminal pane above the mobile software keyboard.
+  // iOS Safari often changes visualViewport without changing CSS 100vh.
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [keyboardViewportHeight, setKeyboardViewportHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const update = () => {
+      const surface = surfaceRef.current;
+      if (!surface) return;
+      const focused = document.activeElement;
+      const keyboardOpen = window.innerHeight - viewport.height - viewport.offsetTop > 120;
+      if (!keyboardOpen || !focused || !surface.contains(focused)) {
+        setKeyboardViewportHeight(null);
+        return;
+      }
+      const top = surface.getBoundingClientRect().top;
+      setKeyboardViewportHeight(Math.max(180, viewport.height + viewport.offsetTop - top));
+    };
+    viewport.addEventListener('resize', update);
+    viewport.addEventListener('scroll', update);
+    document.addEventListener('focusin', update);
+    document.addEventListener('focusout', update);
+    return () => {
+      viewport.removeEventListener('resize', update);
+      viewport.removeEventListener('scroll', update);
+      document.removeEventListener('focusin', update);
+      document.removeEventListener('focusout', update);
+    };
+  }, []);
+
   const noTabs = tabs.length === 0;
   const ready = isWebBrowser || isDiff || isAgentSessionList || (isReady && status === 'connected' && !noTabs);
   const isFirstConnectionForTab =
@@ -740,10 +771,12 @@ const MobileSurfaceView = ({
 
   return (
     <div
+      ref={surfaceRef}
       className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       style={{
         backgroundColor: terminalTheme.colors.background,
         overscrollBehavior: 'none',
+        ...(keyboardViewportHeight !== null ? { height: keyboardViewportHeight, maxHeight: keyboardViewportHeight, flex: 'none' } : {}),
       }}
     >
       {isWebBrowser && activeTabId && (
