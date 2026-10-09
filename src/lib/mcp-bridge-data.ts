@@ -103,12 +103,17 @@ export const listBridgeCodexTabs = async (workspaceId?: unknown) => {
         ? await peekCodexGuiRuntime(workspace.id, tab.id) : null;
       const persisted = tab.panelType === 'codex-chat' && !active
         ? await readPersistedChat(workspace.id, tab.id) : null;
+      const directory = (workspace.hostId ? workspace.remoteDirectory :
+        (tab.cwd || workspace.directories[0])) || '';
       rows.push({
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         hostId: workspace.hostId || 'local',
-        directory: (workspace.hostId ? workspace.remoteDirectory :
-          (tab.cwd || workspace.directories[0])) || '',
+        directory,
+        // The resumed Codex thread can have a cwd different from its tab.
+        // Surface that discrepancy before a client attempts continuation.
+        threadDirectory: active?.cwd || null,
+        threadMatchesDirectory: active?.cwd ? active.cwd.replace(/\/+$/, '') === directory.replace(/\/+$/, '') : null,
         tabId: tab.id,
         tabName: tab.name,
         panelType: tab.panelType || 'terminal',
@@ -162,7 +167,9 @@ export const getBridgeCodexStatus = async (
     workspaceId: workspace.id,
     tabId: tab.id,
     hostId: workspace.hostId || 'local',
-    directory: workspaceLocation(workspace),
+    directory: (workspace.hostId ? workspace.remoteDirectory :
+      (tab.cwd || workspace.directories[0])) || '',
+    threadDirectory: state.cwd,
     status: state.busy ? 'running' : state.ready ? 'ready' : 'unavailable',
     ready: state.ready,
     busy: state.busy,
