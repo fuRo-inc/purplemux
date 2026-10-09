@@ -317,7 +317,7 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
     if (!isWebBrowser) {
       const workspace = await getWorkspaceById(wsId);
       if (workspace?.hostId) {
-        if (panelType && panelType !== 'terminal' && panelType !== 'codex-cli') {
+        if (panelType && panelType !== 'terminal' && panelType !== 'codex-cli' && panelType !== 'codex-chat') {
           throw new Error('Remote workspace supports Terminal and Codex only');
         }
         await createSession(sessionName, 80, 24, undefined);
