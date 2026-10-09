@@ -388,8 +388,6 @@ export class CodexGuiRuntime {
         this.state.fastMode = false;
         await this.store();
       }
-      const active = this.state.models.find((item) =>
-        item.model === (this.state.model || this.state.models.find((entry) => entry.isDefault)?.model));
       // Missing catalog metadata does not establish that Fast is unsupported.
       // Preserve an explicit opt-in; the App Server remains authoritative when
       // the next turn is started. "priority" is the canonical request tier.
@@ -529,8 +527,6 @@ export class CodexGuiRuntime {
           this.state.effort = asString(result.reasoningEffort) ||
             asString(history.reasoningEffort) || null;
         }
-        const model = this.state.models.find((entry) =>
-          entry.model === (this.state.model || this.state.models.find((m) => m.isDefault)?.model));
         // A thread may have been created on an older CLI where model/list
         // did not advertise service tiers. Keep the user's explicit setting.
         this.restore(history);
