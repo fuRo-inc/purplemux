@@ -22,6 +22,7 @@ import { buildClaudeLaunchCommand } from '@/lib/providers/claude/client';
 import { fetchCodexLaunchCommand } from '@/lib/providers/codex/client';
 import { sendCodexQuitCommand } from '@/lib/agent-terminal-commands';
 import TerminalContainer from '@/components/features/workspace/terminal-container';
+import TerminalHistoryViewer from '@/components/features/workspace/terminal-history-viewer';
 import ClaudeCodePanel from '@/components/features/workspace/claude-code-panel';
 import CodexPanel from '@/components/features/workspace/codex-panel';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
@@ -204,6 +205,51 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
   );
 
   const layoutWsId = useLayoutStore((state) => state.workspaceId);
+
+  // Live terminal output is rendered through nested tmux. Its earlier lines
+  // belong to tmux, not necessarily to xterm's browser-side scrollback.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyContent, setHistoryContent] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyRequestIdRef = useRef(0);
+
+  const openTerminalHistory = useCallback(async () => {
+    const workspaceId = layoutWsId;
+    const session = activeTab?.sessionName;
+    if (!workspaceId || !session) return;
+    const requestId = ++historyRequestIdRef.current;
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const query = new URLSearchParams({ workspace: workspaceId, session });
+      const response = await fetch(`/api/terminal/history?${query}`, { cache: 'no-store' });
+      const data: { content?: string; error?: string } = await response.json();
+      if (!response.ok) throw new Error(data.error ?? '履歴の取得に失敗しました');
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryContent(data.content ?? '');
+    } catch (err) {
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryError(err instanceof Error ? err.message : '通信エラー');
+    } finally {
+      if (requestId === historyRequestIdRef.current) setHistoryLoading(false);
+    }
+  }, [layoutWsId, activeTab?.sessionName]);
+
+  const closeTerminalHistory = useCallback(() => {
+    historyRequestIdRef.current++;
+    setHistoryOpen(false);
+    setHistoryContent(null);
+    setHistoryLoading(false);
+    setHistoryError(null);
+  }, []);
+
+  useEffect(() => {
+    closeTerminalHistory();
+    return () => { historyRequestIdRef.current++; };
+  }, [layoutWsId, activeTab?.sessionName, closeTerminalHistory]);
+
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setMounted(true));
@@ -437,6 +483,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
     onInput: (data) => {
       wsActionsRef.current.sendStdin(applyArmedModifier(data));
     },
+    onHistoryRequested: () => { if (!historyOpen && !historyLoading) void openTerminalHistory(); },
     onResize: sendEffectiveResize,
     onTitleChange: (title) => {
       const tabId = activeTabIdRef.current;
@@ -1157,6 +1204,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
         onMoveTab={handleMoveTab}
         onFocusPane={handleFocusPane}
         onRetry={() => {}}
+        onOpenHistory={() => void openTerminalHistory()}
       />
 
       <div
@@ -1360,6 +1408,16 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
             </div>
           </Panel>
         </Group>
+
+        {historyOpen && (
+          <TerminalHistoryViewer
+            content={historyContent}
+            loading={historyLoading}
+            error={historyError}
+            onClose={closeTerminalHistory}
+            onReload={() => void openTerminalHistory()}
+          />
+        )}
 
         {noTabs && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3">
