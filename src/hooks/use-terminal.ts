@@ -479,6 +479,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         const requestStoredHistory = () => {
           if (!historyRequestedForGesture && callbacksRef.current.onHistoryRequested) {
             historyRequestedForGesture = true;
+            moved = true; // do not refocus the software keyboard on touchend
             callbacksRef.current.onHistoryRequested();
           }
         };
