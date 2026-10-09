@@ -27,6 +27,13 @@ const COPY_TOAST_ID = 'terminal-copy';
 
 const DEFAULT_FONT_SIZE = 12;
 
+// Bound browser-side terminal output during commands such as cat on large logs.
+// xterm.write() is asynchronous and has its own buffer, so feed one chunk only
+// after its callback to avoid unbounded buffering on both sides.
+const MAX_PENDING_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_WRITE_CHUNK_BYTES = 64 * 1024;
+const OUTPUT_TRUNCATED_NOTICE = '\r\n\x1b[33m[Purplemux] Excess terminal output skipped to keep the page responsive. Use less/tail for large logs.\x1b[0m\r\n';
+
 const ALLOWED_LINK_PROTOCOLS = ['http:', 'https:'];
 
 const openExternalUrl = (uri: string) => {
@@ -77,7 +84,9 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const writeQueueRef = useRef<Uint8Array[]>([]);
+  const pendingBytesRef = useRef(0);
   const isWritingRef = useRef(false);
+  const writeGenerationRef = useRef(0);
   const [isReady, setIsReady] = useState(false);
   const t = useTranslations('terminal');
 
@@ -87,38 +96,62 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
     callbacksRef.current = { theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, t };
   }, [theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, t]);
 
-  const write = useCallback((data: Uint8Array) => {
-    writeQueueRef.current.push(data);
-    if (!isWritingRef.current) {
-      isWritingRef.current = true;
-      const flush = () => {
-        requestAnimationFrame(() => {
-          const terminal = terminalInstance.current;
-          const queue = writeQueueRef.current;
-          if (!terminal || queue.length === 0) {
-            isWritingRef.current = false;
-            return;
-          }
+  const drainWriteQueue = useCallback(() => {
+    if (isWritingRef.current) return;
+    const terminal = terminalInstance.current;
+    if (!terminal) return;
+    isWritingRef.current = true;
+    const generation = writeGenerationRef.current;
 
-          const startTime = performance.now();
-          let consumed = 0;
-          while (consumed < queue.length && performance.now() - startTime < 12) {
-            terminal.write(queue[consumed]);
-            consumed++;
-          }
-
-          if (consumed >= queue.length) {
-            queue.length = 0;
-            isWritingRef.current = false;
-          } else {
-            writeQueueRef.current = queue.slice(consumed);
-            flush();
-          }
-        });
-      };
-      flush();
-    }
+    const step = () => {
+      if (writeGenerationRef.current !== generation || terminalInstance.current !== terminal) {
+        isWritingRef.current = false;
+        return;
+      }
+      const chunk = writeQueueRef.current.shift();
+      if (!chunk) {
+        isWritingRef.current = false;
+        return;
+      }
+      pendingBytesRef.current -= chunk.byteLength;
+      // The callback fires after the chunk has been processed by xterm.
+      terminal.write(chunk, () => {
+        if (writeGenerationRef.current !== generation) return;
+        // Yield to input, layout and paint even under sustained stdout.
+        setTimeout(step, 0);
+      });
+    };
+    step();
   }, []);
+
+  const write = useCallback((data: Uint8Array) => {
+    const terminal = terminalInstance.current;
+    if (!terminal || data.byteLength === 0) return;
+    // Keep the latest output, discarding an old backlog rather than freezing
+    // the browser. Fragmented ANSI sequences may be split at this boundary,
+    // so reset parser state when truncating.
+    if (pendingBytesRef.current + data.byteLength > MAX_PENDING_OUTPUT_BYTES) {
+      writeGenerationRef.current++;
+      writeQueueRef.current = [];
+      pendingBytesRef.current = 0;
+      isWritingRef.current = false;
+      terminal.reset();
+      const notice = new TextEncoder().encode(OUTPUT_TRUNCATED_NOTICE);
+      writeQueueRef.current.push(notice);
+      pendingBytesRef.current += notice.byteLength;
+    }
+    for (let offset = 0; offset < data.byteLength; offset += MAX_WRITE_CHUNK_BYTES) {
+      const chunk = data.subarray(offset, Math.min(offset + MAX_WRITE_CHUNK_BYTES, data.byteLength));
+      writeQueueRef.current.push(chunk);
+      pendingBytesRef.current += chunk.byteLength;
+    }
+    // Also handle a single exceptionally large websocket frame.
+    while (pendingBytesRef.current > MAX_PENDING_OUTPUT_BYTES && writeQueueRef.current.length > 1) {
+      const dropped = writeQueueRef.current.splice(1, 1)[0];
+      pendingBytesRef.current -= dropped.byteLength;
+    }
+    drainWriteQueue();
+  }, [drainWriteQueue]);
 
   const clear = useCallback(() => {
     terminalInstance.current?.clear();
@@ -147,7 +180,9 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
   }, []);
 
   const reset = useCallback(() => {
+    writeGenerationRef.current++;
     writeQueueRef.current = [];
+    pendingBytesRef.current = 0;
     isWritingRef.current = false;
     terminalInstance.current?.reset();
   }, []);
@@ -318,6 +353,10 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       clearTimeout(reFitTimer);
       resizeObserver?.disconnect();
       cleanupTouch?.();
+      writeGenerationRef.current++;
+      writeQueueRef.current = [];
+      pendingBytesRef.current = 0;
+      isWritingRef.current = false;
       terminalInstance.current?.dispose();
       terminalInstance.current = null;
       fitAddonRef.current = null;
