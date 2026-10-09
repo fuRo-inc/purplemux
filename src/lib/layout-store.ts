@@ -309,7 +309,7 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
           throw new Error('Remote workspace supports Terminal and Codex only');
         }
         await createSession(sessionName, 80, 24, undefined);
-        await sendKeys(sessionName, await buildRemoteShellCommand(workspace, panelType === 'codex-cli' ? 'codex' : undefined));
+        await sendKeys(sessionName, await buildRemoteShellCommand(workspace, panelType === 'codex-cli' || command === 'remote-codex' ? 'codex' : undefined));
       } else {
         await createSession(sessionName, 80, 24, cwd);
         if (command) {
