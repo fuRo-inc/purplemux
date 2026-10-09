@@ -119,7 +119,7 @@ const taskWriteTools = [
   {
     name: 'start_codex_task',
     title: 'Start a Codex task in a verified workspace',
-    description: 'Submit work to the specified existing Codex Chat tab. Can modify files inside the workspace. Always verify host and directory against list_codex_tabs. Requires confirmTarget=true. Returns taskId immediately.',
+    description: 'Submit a bounded instruction to an existing Codex Chat tab. Read-only by default. To allow workspace file edits, explicitly set sandboxMode=workspace-write and confirmWriteAccess=true. Verify exact host, workspace and directory against list_codex_tabs; confirmTarget=true is required. Returns a taskId for polling.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -129,6 +129,10 @@ const taskWriteTools = [
         expectedDirectory: { type: 'string' },
         instruction: { type: 'string', minLength: 1, maxLength: 16000 },
         mode: { type: 'string', enum: ['continue', 'new'], default: 'continue' },
+        sandboxMode: { type: 'string', enum: ['read-only', 'workspace-write'], default: 'read-only',
+          description: 'MCP defaults to read-only; workspace-write can change files and requires confirmWriteAccess=true.' },
+        confirmWriteAccess: { type: 'boolean', default: false,
+          description: 'Required true only for sandboxMode=workspace-write after the user approves file modification.' },
         idempotencyKey: { type: 'string', description: 'Optional unique client key to avoid duplicate task submission on retry.' },
         confirmTarget: { type: 'boolean', description: 'Must be true after verifying the target.' },
       },
@@ -183,7 +187,7 @@ const rpcError = (id: RpcId, code: number, message: string, data?: unknown): Rpc
 
 const serverInfo = { name: 'purplemux-readonly', version: '0.1.0' };
 const instructions = () => writesEnabled()
-  ? 'Purplemux development bridge. Read status before targeting a Codex tab, confirm exact host and working directory, then submit a task. File changes and approvals require explicit user review. Always poll taskId for completion.'
+  ? 'Purplemux development bridge. Before submitting work inspect list_codex_tabs, confirm the exact host/cwd and ask the user to approve the task. Tasks default to read-only; workspace writes require sandboxMode=workspace-write plus confirmWriteAccess=true. Never automatically accept Codex approval prompts. Poll taskId for completion.'
   : 'Read-only development status bridge. Task submission, interruption and approvals are disabled until the NUC operator explicitly opts in. Host SSH connectivity may not have been checked.';
 
 export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string): Promise<RpcReply | null> => {
