@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, Copy, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 import { copyToClipboard } from '@/lib/clipboard';
 
 interface IMobileTerminalHistoryProps {
@@ -54,7 +55,8 @@ export default function MobileTerminalHistory({
 
   const copySelection = useCallback(async () => {
     if (!selectedText) return;
-    await copyToClipboard(selectedText);
+    if (await copyToClipboard(selectedText)) toast.success('選択範囲をコピーしました');
+    else toast.error('コピーできませんでした。OSの選択メニューをお試しください。');
   }, [selectedText]);
 
   return (
