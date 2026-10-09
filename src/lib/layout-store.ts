@@ -282,7 +282,7 @@ export const createPane = async (wsId: string, cwd?: string): Promise<{ paneId: 
   const workspace = await getWorkspaceById(wsId);
   await createSession(sessionName, 80, 24, workspace?.hostId ? undefined : cwd);
   if (workspace?.hostId) {
-    await sendKeys(sessionName, await buildRemoteShellCommand(workspace));
+    await sendKeys(sessionName, await buildRemoteShellCommand(workspace, undefined, sessionName));
   }
 
   const tab: ITab = { id: tabId, sessionName, name: '', order: 0, ...(cwd ? { cwd } : {}) };
@@ -434,7 +434,7 @@ export const restartTabSession = async (wsId: string, paneId: string, tabId: str
     const remoteWorkspace = await getWorkspaceById(wsId);
     await createSession(tab.sessionName, 80, 24, remoteWorkspace?.hostId ? undefined : effectiveCwd);
     if (remoteWorkspace?.hostId) {
-      await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace));
+      await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace, undefined, tab.sessionName));
     } else if (command && !cwdLost) {
       await sendKeys(tab.sessionName, command);
     }
