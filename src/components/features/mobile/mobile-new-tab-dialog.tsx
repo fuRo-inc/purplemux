@@ -25,7 +25,7 @@ const MobileNewTabDialog = ({ open, onOpenChange, onCreateTab }: IMobileNewTabDi
 
   const MENU_ITEMS = [
     { key: 'claude', type: 'claude-code' as const, icon: <ClaudeCodeIcon className="h-5 w-5" />, label: tt('claudeNewConversation'), startCommand: 'claude-new' as const },
-    { key: 'codex', type: 'codex-cli' as const, icon: <OpenAIIcon className="h-5 w-5" />, label: tt('codexNewConversation'), startCommand: 'codex-new' as const },
+    { key: 'codex', type: 'codex-chat' as const, icon: <OpenAIIcon className="h-5 w-5" />, label: tt('codexNewConversation') },
     { key: 'agent-sessions', type: 'agent-sessions' as const, icon: <History className="h-5 w-5 text-muted-foreground" />, label: tt('sessionList') },
     { key: 'terminal', type: 'terminal' as const, icon: <Terminal className="h-5 w-5 text-muted-foreground" />, label: 'Terminal' },
   ] as const;
