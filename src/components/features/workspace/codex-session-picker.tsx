@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clock3, Folder, LoaderCircle, RefreshCw, Search } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, Circle, Folder, LoaderCircle, RefreshCw, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import type { CodexGuiSessionPage, CodexGuiSessionSummary } from '@/lib/codex-app-gui';
 
 interface ICodexSessionPickerProps {
@@ -17,14 +15,29 @@ interface ICodexSessionPickerProps {
   onResume: (session: CodexGuiSessionSummary) => Promise<void>;
 }
 
-const formatTime = (seconds: number) => {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '日時不明';
-  return new Date(seconds * 1000).toLocaleString('ja-JP', {
-    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
-  });
+const RECENT_PER_GROUP = 6;
+
+const normalizedPath = (cwd: string) => cwd.replace(/\/+$/, '') || '/';
+const displayPath = (cwd: string) => cwd.replace(/^\/home\/[^/]+(?=\/|$)/, '~') || '(ディレクトリ不明)';
+const timeSince = (seconds: number) => {
+  if (!seconds) return '—';
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
+  if (diff < 60) return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 86400 * 30) return Math.floor(diff / 86400) + 'd ago';
+  return new Date(seconds * 1000).toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
 };
 
-const normalizePath = (cwd: string) => cwd.replace(/\/+$/, '') || '/';
+const statusOf = (status: string) => {
+  switch (status) {
+    case 'idle': return { label: 'Ready', color: 'text-emerald-500' };
+    case 'active': return { label: 'Running', color: 'text-sky-400' };
+    case 'systemError': return { label: 'Error', color: 'text-red-400' };
+    case 'notLoaded': return { label: 'Inactive', color: 'text-muted-foreground' };
+    default: return { label: 'Inactive', color: 'text-muted-foreground' };
+  }
+};
 
 export default function CodexSessionPicker({
   open, onOpenChange, workspaceId, tabId, currentThreadId, busy, onResume,
@@ -39,7 +52,10 @@ export default function CodexSessionPicker({
   const [error, setError] = useState('');
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const [confirmSession, setConfirmSession] = useState<CodexGuiSessionSummary | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const generationRef = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null);
   const [refreshId, setRefreshId] = useState(0);
 
   useEffect(() => {
@@ -55,6 +71,8 @@ export default function CodexSessionPicker({
       setSessions([]);
       setNextCursor(null);
       setConfirmSession(null);
+      setSelectedId(null);
+      setExpandedGroups({});
     }
     try {
       const params = new URLSearchParams({ workspaceId, tabId, scope });
@@ -91,12 +109,45 @@ export default function CodexSessionPicker({
     return () => { generationRef.current++; };
   }, [open, loadPage, refreshId]);
 
+  const groups = useMemo(() => {
+    const filtered = sessions.filter((session) =>
+      !debouncedSearch ||
+      [session.preview, session.cwd, session.id, session.model || ''].join(' ')
+        .toLocaleLowerCase().includes(debouncedSearch.toLocaleLowerCase()),
+    );
+    const byCwd = new Map<string, CodexGuiSessionSummary[]>();
+    for (const session of filtered) {
+      const cwd = session.cwd || '(unknown)';
+      const group = byCwd.get(cwd) ?? [];
+      group.push(session);
+      byCwd.set(cwd, group);
+    }
+    return Array.from(byCwd.entries())
+      .map(([cwd, rows]) => ({
+        cwd,
+        rows: rows.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)),
+      }))
+      .sort((a, b) => (b.rows[0]?.updatedAt || b.rows[0]?.createdAt || 0) -
+        (a.rows[0]?.updatedAt || a.rows[0]?.createdAt || 0));
+  }, [sessions, debouncedSearch]);
+
+  const visibleGroups = useMemo(() =>
+    groups.map(({ cwd, rows }) => ({
+      cwd,
+      count: rows.length,
+      rows: expandedGroups[cwd] || debouncedSearch ? rows : rows.slice(0, RECENT_PER_GROUP),
+    })),
+  [groups, expandedGroups, debouncedSearch]);
+
+  const visibleRows = useMemo(() => visibleGroups.flatMap((group) => group.rows), [visibleGroups]);
+  const activeId = selectedId && visibleRows.some((row) => row.id === selectedId)
+    ? selectedId : visibleRows[0]?.id ?? null;
+
   const selectSession = async (session: CodexGuiSessionSummary) => {
     if (busy || selectingId || loading) return;
     if (session.id === currentThreadId) { onOpenChange(false); return; }
-    const differentCwd = workspaceCwd && session.cwd &&
-      normalizePath(session.cwd) !== normalizePath(workspaceCwd);
-    if (differentCwd && confirmSession?.id !== session.id) {
+    if (workspaceCwd && session.cwd && normalizedPath(session.cwd) !== normalizedPath(workspaceCwd)
+        && confirmSession?.id !== session.id) {
       setConfirmSession(session);
       return;
     }
@@ -113,95 +164,151 @@ export default function CodexSessionPicker({
     }
   };
 
-  const visible = sessions.filter((session) => {
-    // Older Codex app-server versions may ignore searchTerm. Keep the
-    // client-side filter as a compatibility fallback on each page.
-    if (!debouncedSearch) return true;
-    const text = [session.preview, session.cwd, session.id, session.model || ''].join(' ').toLocaleLowerCase();
-    return text.includes(debouncedSearch.toLocaleLowerCase());
-  });
+  const onListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!visibleRows.length) return;
+      const index = visibleRows.findIndex((row) => row.id === activeId);
+      const next = (index + (event.key === 'ArrowDown' ? 1 : -1) + visibleRows.length) % visibleRows.length;
+      const id = visibleRows[next].id;
+      setSelectedId(id);
+      const element = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[data-session-id]') ?? [])
+        .find((node) => node.dataset.sessionId === id);
+      element?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter' && activeId) {
+      event.preventDefault();
+      const row = visibleRows.find((session) => session.id === activeId);
+      if (row) void selectSession(row);
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={(value) => { if (!selectingId) onOpenChange(value); }}>
-      <DialogContent className="flex max-h-[min(82dvh,760px)] w-[calc(100vw-1.5rem)] max-w-2xl flex-col gap-3 overflow-hidden p-4 sm:p-5">
+      <DialogContent className="flex h-[min(85dvh,790px)] w-[calc(100vw-1.5rem)] max-w-5xl flex-col gap-3 overflow-hidden p-4 sm:p-5">
         <DialogHeader>
-          <DialogTitle>以前のCodexセッション</DialogTitle>
+          <DialogTitle>Codex セッション</DialogTitle>
           <DialogDescription>
-            現在のHostに保存された会話を検索し、選択したChatタブで続きを実行できます。
+            作業ディレクトリ別の履歴から、以前の会話の続きを開けます。
           </DialogDescription>
         </DialogHeader>
+
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              aria-label="過去のCodex会話を検索"
+              aria-label="セッションを検索"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="会話のタイトル・作業フォルダ・セッションIDで検索"
+              placeholder="会話名・作業ディレクトリ・IDを検索"
               className="pl-9"
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowDown' && visibleRows.length) {
+                  event.preventDefault();
+                  listRef.current?.focus();
+                }
+              }}
             />
           </div>
+          <select
+            aria-label="履歴の対象範囲"
+            value={scope}
+            onChange={(event) => setScope(event.target.value as 'host' | 'workspace')}
+            className="h-9 max-w-52 rounded-md border bg-background px-2 text-xs"
+          >
+            <option value="host">このHostのすべて</option>
+            <option value="workspace">現在のディレクトリ</option>
+          </select>
           <Button size="sm" variant="outline" disabled={loading} onClick={() => setRefreshId((v) => v + 1)}
-            aria-label="会話履歴を更新" title="会話履歴を更新">
+            aria-label="会話履歴を更新">
             <RefreshCw className="h-4 w-4" />
           </Button>
         </div>
-        <div className="flex shrink-0 items-center gap-2 text-xs">
-          <label htmlFor="codex-session-scope" className="shrink-0 text-muted-foreground">検索対象</label>
-          <select
-            id="codex-session-scope"
-            value={scope}
-            onChange={(event) => setScope(event.target.value as 'host' | 'workspace')}
-            className="h-8 max-w-full rounded-md border bg-background px-2 text-xs"
-          >
-            <option value="host">このHostのすべての会話</option>
-            <option value="workspace">この作業ディレクトリのみ</option>
-          </select>
-          <span className="ml-auto shrink-0 text-muted-foreground">{visible.length} 件表示</span>
+
+        <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_74px] gap-3 border-b px-3 pb-2 text-[11px] font-medium text-muted-foreground sm:grid-cols-[minmax(0,1fr)_108px_84px]">
+          <span>Tasks</span>
+          <span className="hidden sm:block">Status</span>
+          <span className="text-right">Updated</span>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-1 overflow-y-auto rounded-md border p-1" style={{ overscrollBehavior: 'contain' }}>
-          {visible.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              disabled={!!selectingId || busy}
-              onClick={() => void selectSession(session)}
-              className="flex w-full flex-col gap-1.5 rounded-md px-3 py-3 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
-            >
-              <span className="flex w-full items-start justify-between gap-2">
-                <span className="min-w-0 flex-1 break-words text-sm font-medium">
-                  {session.preview.trim() || 'タイトルのない会話'}
-                </span>
-                {session.id === currentThreadId && (
-                  <span className="shrink-0 rounded bg-muted px-2 py-0.5 text-[10px]">現在の会話</span>
-                )}
-                {selectingId === session.id && <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" />}
-              </span>
-              <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                <span className="inline-flex items-center gap-1"><Clock3 className="h-3 w-3" />{formatTime(session.updatedAt || session.createdAt)}</span>
-                <span>{session.model || 'Codex'}</span>
-                <span>{session.source}</span>
-              </span>
-              {session.cwd && (
-                <span className="inline-flex max-w-full items-start gap-1 break-all font-mono text-[10px] text-muted-foreground">
-                  <Folder className="mt-0.5 h-3 w-3 shrink-0" />{session.cwd}
-                </span>
+        <div
+          ref={listRef}
+          tabIndex={0}
+          role="listbox"
+          aria-label="Codexセッション一覧"
+          aria-activedescendant={activeId ? 'codex-session-' + activeId : undefined}
+          onKeyDown={onListKeyDown}
+          className="min-h-0 flex-1 overflow-y-auto rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          style={{ overscrollBehavior: 'contain' }}
+        >
+          {visibleGroups.map((group) => (
+            <section key={group.cwd} className="pb-3">
+              <div className="flex items-center gap-2 px-3 pb-1 pt-3 text-xs text-muted-foreground">
+                <Folder className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 truncate font-mono" title={group.cwd}>{displayPath(group.cwd)}</span>
+                <span className="shrink-0 tabular-nums">{group.count}</span>
+              </div>
+              <div className="flex flex-col">
+                {group.rows.map((session) => {
+                  const isActive = activeId === session.id;
+                  const status = statusOf(session.status);
+                  const time = session.updatedAt || session.createdAt;
+                  return (
+                    <button
+                      key={session.id}
+                      id={'codex-session-' + session.id}
+                      data-session-id={session.id}
+                      role="option"
+                      aria-selected={isActive}
+                      type="button"
+                      title={session.preview || session.id}
+                      disabled={!!selectingId || busy}
+                      onMouseEnter={() => setSelectedId(session.id)}
+                      onFocus={() => setSelectedId(session.id)}
+                      onClick={() => void selectSession(session)}
+                      className={`grid w-full grid-cols-[minmax(0,1fr)_74px] items-center gap-3 rounded-sm px-3 py-1.5 text-left text-xs transition-colors sm:grid-cols-[minmax(0,1fr)_108px_84px] ${isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60'} disabled:opacity-50`}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        {selectingId === session.id
+                          ? <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
+                          : <Circle className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />}
+                        <span className="min-w-0 truncate">
+                          {session.preview.trim() || 'Untitled task'}
+                        </span>
+                        {session.id === currentThreadId &&
+                          <span className="shrink-0 text-[10px] text-muted-foreground">(current)</span>}
+                      </span>
+                      <span className={`hidden text-[11px] sm:block ${status.color}`}>{status.label}</span>
+                      <span className="text-right font-mono text-[11px] tabular-nums text-muted-foreground" title={time ? new Date(time * 1000).toLocaleString('ja-JP') : undefined}>
+                        {timeSince(time)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {!expandedGroups[group.cwd] && !debouncedSearch && group.count > RECENT_PER_GROUP && (
+                <button
+                  type="button"
+                  className="flex items-center gap-1 px-6 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => setExpandedGroups((prev) => ({ ...prev, [group.cwd]: true }))}
+                >
+                  <ChevronDown className="h-3 w-3" /> Show more ({group.count - RECENT_PER_GROUP})
+                </button>
               )}
-            </button>
+            </section>
           ))}
+
           {loading && sessions.length === 0 && (
-            <p className="flex items-center justify-center gap-2 px-3 py-9 text-sm text-muted-foreground">
+            <p className="flex items-center justify-center gap-2 px-3 py-10 text-sm text-muted-foreground">
               <LoaderCircle className="h-4 w-4 animate-spin" /> 履歴を取得中…
             </p>
           )}
-          {!loading && visible.length === 0 && (
+          {!loading && visibleRows.length === 0 && (
             <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-              一致する会話がありません。必要に応じて「さらに読み込む」または検索対象を変更してください。
+              セッションが見つかりません。検索条件を変えるか、次のページを読み込んでください。
             </p>
           )}
           {nextCursor && (
-            <div className="py-2 text-center">
+            <div className="px-3 pb-4 pt-2">
               <Button size="sm" variant="outline" disabled={loading} onClick={() => void loadPage(nextCursor, false)}>
                 {loading ? '取得中…' : 'さらに読み込む'}
               </Button>
@@ -211,19 +318,22 @@ export default function CodexSessionPicker({
 
         {confirmSession && (
           <div className="shrink-0 space-y-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
-            <p className="font-medium">異なる作業ディレクトリの会話です</p>
-            <p className="break-all text-muted-foreground">再開先：{confirmSession.cwd}</p>
-            <p className="text-muted-foreground">続けると、この会話の元の作業ディレクトリでCodexが動作します。既存の会話履歴は削除されません。</p>
+            <p className="font-medium">元の作業ディレクトリで再開します</p>
+            <p className="break-all text-muted-foreground">{confirmSession.cwd}</p>
+            <p className="text-muted-foreground">現在のWorkspaceとは異なるディレクトリです。Codexが変更するファイルの場所に注意してください。</p>
             <div className="flex justify-end gap-2">
-              <Button size="sm" variant="outline" disabled={!!selectingId} onClick={() => setConfirmSession(null)}>キャンセル</Button>
+              <Button size="sm" variant="outline" onClick={() => setConfirmSession(null)}>キャンセル</Button>
               <Button size="sm" disabled={!!selectingId || busy} onClick={() => void selectSession(confirmSession)}>
-                {selectingId ? '復元中…' : 'この場所で会話を再開'}
+                {selectingId ? '復元中…' : 'この会話を再開'}
               </Button>
             </div>
           </div>
         )}
         {error && <p role="alert" className="shrink-0 text-xs text-destructive">{error}</p>}
-        {busy && <p className="shrink-0 text-xs text-muted-foreground">Codexの処理中はセッションを切り替えられません。</p>}
+        <div className="flex shrink-0 items-center justify-between gap-2 text-[11px] text-muted-foreground">
+          <span>{visibleRows.length} sessions · ↑ ↓ 選択 · Enter 再開 · Esc 閉じる</span>
+          {busy && <span>実行中はセッションの切り替え不可</span>}
+        </div>
       </DialogContent>
     </Dialog>
   );
