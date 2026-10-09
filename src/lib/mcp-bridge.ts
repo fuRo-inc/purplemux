@@ -1,9 +1,9 @@
 /**
- * Purplemux MCP Bridge (read-only phase).
+ * Purplemux MCP Bridge (read-only by default; Codex tasks require opt-in).
  *
  * Streamable HTTP JSON-RPC on 127.0.0.1 ONLY. No additional dependencies,
- * no shell/file mutation tools, and no access to this endpoint via the main
- * browser-facing Purplemux port.
+ * no direct shell/file mutation tools, and no access to the browser-facing
+ * Purplemux port. Codex task tools are gated by explicit operator settings.
  *
  * The stdio shim is the only intended client. It authenticates with a local
  * 0600 bearer token; tunnel-client runs the shim instead of forwarding TCP.
