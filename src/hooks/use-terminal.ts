@@ -285,7 +285,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           const value = event.clipboardData?.getData('text/plain');
           if (value) {
             event.preventDefault();
-            callbacksRef.current.onInput?.(value.replace(/\\r?\\n/g, '\\r'));
+            callbacksRef.current.onInput?.(value.replace(/\r?\n/g, '\r'));
             closePastePrompt();
             terminal.focus();
           }
@@ -300,7 +300,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         try {
           if (!navigator.clipboard?.readText) { showPastePrompt(); return; }
           const text = await navigator.clipboard.readText();
-          if (text) callbacksRef.current.onInput?.(text.replace(/\\r?\\n/g, '\\r'));
+          if (text) callbacksRef.current.onInput?.(text.replace(/\r?\n/g, '\r'));
           terminal.focus();
         } catch {
           showPastePrompt();
