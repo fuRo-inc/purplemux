@@ -183,6 +183,7 @@ export const crossCheckLayout = async (
   defaultCwd?: string,
 ): Promise<boolean> => {
   let changed = false;
+  const remoteWorkspace = await getWorkspaceById(wsId);
   const tmuxSet = new Set(tmuxSessions);
   const panes = collectPanes(layout.root);
   const layoutSessions = new Set<string>();
@@ -192,10 +193,13 @@ export const crossCheckLayout = async (
       if (tab.panelType === 'web-browser') continue;
       layoutSessions.add(tab.sessionName);
 
-      if (!tmuxSet.has(tab.sessionName) && isAgentPanelType(tab.panelType)) {
+      if (!tmuxSet.has(tab.sessionName) && (isAgentPanelType(tab.panelType) || !!remoteWorkspace?.hostId)) {
         const cwd = tab.cwd || defaultCwd;
         log.debug(`crossCheck: agent tab session recreated: ${tab.sessionName} (cwd: ${cwd})`);
-        await createSession(tab.sessionName, 80, 24, cwd);
+        await createSession(tab.sessionName, 80, 24, remoteWorkspace?.hostId ? undefined : cwd);
+        if (remoteWorkspace?.hostId) {
+          await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace));
+        }
         changed = true;
       }
     }
@@ -419,8 +423,11 @@ export const restartTabSession = async (wsId: string, paneId: string, tabId: str
     const effectiveCwd = await resolveExistingDir(tab.cwd);
     const cwdLost = Boolean(tab.cwd && tab.cwd !== effectiveCwd);
 
-    await createSession(tab.sessionName, 80, 24, effectiveCwd);
-    if (command && !cwdLost) {
+    const remoteWorkspace = await getWorkspaceById(wsId);
+    await createSession(tab.sessionName, 80, 24, remoteWorkspace?.hostId ? undefined : effectiveCwd);
+    if (remoteWorkspace?.hostId) {
+      await sendKeys(tab.sessionName, await buildRemoteShellCommand(remoteWorkspace));
+    } else if (command && !cwdLost) {
       await sendKeys(tab.sessionName, command);
     }
 
