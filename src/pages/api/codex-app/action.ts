@@ -7,8 +7,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method not allowed' });
   }
-  const { workspaceId, tabId, action, text, model, effort, requestId, decision } = req.body ?? {};
-  if (!['send', 'interrupt', 'approve', 'new-thread', 'settings'].includes(action)) {
+  const { workspaceId, tabId, action, text, model, effort, requestId, decision, threadId } = req.body ?? {};
+  if (!['send', 'interrupt', 'approve', 'new-thread', 'settings', 'resume-thread'].includes(action)) {
     return res.status(400).json({ error: 'Invalid Codex action' });
   }
   if (text !== undefined && (typeof text !== 'string' || text.length > 100000)) {
@@ -18,10 +18,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       (effort !== undefined && (typeof effort !== 'string' || effort.length > 32))) {
     return res.status(400).json({ error: 'Invalid model configuration' });
   }
+  if (action === 'resume-thread' &&
+      (typeof threadId !== 'string' || !/^[0-9a-fA-F-]{36}$/.test(threadId))) {
+    return res.status(400).json({ error: 'Invalid Codex session ID' });
+  }
   try {
     const { workspace, tab } = await resolveCodexAppTab(workspaceId, tabId);
     const runtime = await getCodexGuiRuntime(workspace, tab);
-    const snapshot = await runtime.action(action, { text, model, effort, requestId, decision });
+    const snapshot = await runtime.action(action, { text, model, effort, requestId, decision, threadId });
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json(snapshot);
   } catch (error) {
