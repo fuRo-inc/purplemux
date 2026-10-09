@@ -25,6 +25,7 @@ import TerminalContainer from '@/components/features/workspace/terminal-containe
 import TerminalHistoryViewer from '@/components/features/workspace/terminal-history-viewer';
 import ClaudeCodePanel from '@/components/features/workspace/claude-code-panel';
 import CodexPanel from '@/components/features/workspace/codex-panel';
+import CodexAppChatPanel from '@/components/features/workspace/codex-app-chat-panel';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
 import WebInputBar from '@/components/features/workspace/web-input-bar';
 import QuickPromptBar from '@/components/features/workspace/quick-prompt-bar';
@@ -130,6 +131,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
   const activePanelType: TPanelType = activeTab?.panelType ?? 'terminal';
   const isClaudeCode = activePanelType === 'claude-code';
   const isCodex = activePanelType === 'codex-cli';
+  const isCodexChat = activePanelType === 'codex-chat';
   const isAgentSessionList = activePanelType === 'agent-sessions';
   const isAgentPanel = isClaudeCode || isCodex;
   const isWebBrowser = activePanelType === 'web-browser';
@@ -1408,6 +1410,12 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
             </div>
           </Panel>
         </Group>
+
+        {isCodexChat && layoutWsId && activeTabId && (
+          <div className="absolute inset-0 z-30">
+            <CodexAppChatPanel key={activeTabId} workspaceId={layoutWsId} tabId={activeTabId} />
+          </div>
+        )}
 
         {historyOpen && (
           <TerminalHistoryViewer
