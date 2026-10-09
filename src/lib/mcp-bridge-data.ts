@@ -107,7 +107,8 @@ export const listBridgeCodexTabs = async (workspaceId?: unknown) => {
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         hostId: workspace.hostId || 'local',
-        directory: workspaceLocation(workspace),
+        directory: (workspace.hostId ? workspace.remoteDirectory :
+          (tab.cwd || workspace.directories[0])) || '',
         tabId: tab.id,
         tabName: tab.name,
         panelType: tab.panelType || 'terminal',
@@ -167,6 +168,8 @@ export const getBridgeCodexStatus = async (
     busy: state.busy,
     threadId: state.threadId,
     turnId: state.turnId,
+    lastTurnId: state.lastTurnId,
+    lastTurnStatus: state.lastTurnStatus,
     model: state.model,
     effort: state.effort,
     fastMode: state.fastMode,
@@ -177,6 +180,10 @@ export const getBridgeCodexStatus = async (
     error: state.error,
     // Content is only included when explicitly requested.
     ...(includeRecentItems ? {
+      pendingApprovals: state.approvals.map((approval) => ({
+        requestId: approval.requestId, method: approval.method,
+        command: approval.command.slice(0, 1000), reason: approval.reason.slice(0, 1000),
+      })),
       recentItems: state.items.slice(-MAX_RECENT).map((item) => ({
         id: item.id,
         type: item.type,
