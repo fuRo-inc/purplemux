@@ -116,3 +116,9 @@ tunnel-client run --profile purplemux-readonly
 - `tests/mcp-bridge.test.ts`: 初期化、2026年版discovery、ツール一覧、読み取り実行、書き込みツール不在、未対応メソッド、通知・プロトコル不整合を確認。
 - **NUC上のNode.jsでの型チェック、テスト、実際のtunnel-client連携は別途実機確認が必要**。
 - 新しいツールの公開範囲を増やす場合はレビューが必要。Phase 2の「Codexへのタスク送信」には操作権限・確認・タスクID・再取得API・監査ログを追加する。
+
+## Phase 2（Codexへのタスク送信）の実装
+
+Codexタスクの開始・進捗／結果取得・中断・承認応答は `docs/chatgpt-mcp-phase2.md` に説明があります。**初期状態では書き込みツールは無効**です。NUCでユーザーが明示的に `PURPLEMUX_MCP_ALLOW_WRITES=1` を設定し、Purplemuxを再起動した場合にだけ利用可能になります。
+
+MCP経由のCodex操作は、Next.jsの既存Codex Chat runtimeへ認証付き内部RPCで委譲します。Phase 1のHost/Workspace取得は維持し、Codexタブのライブ状態はブラウザと同一runtimeから読み取ります。従来CLIの操作には対応していません。
