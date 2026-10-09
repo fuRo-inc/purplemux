@@ -244,16 +244,102 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
 
       terminal.open(containerNode);
 
-      // Keep the browser's native context menu, but do not forward right-click
-      // mouse events to xterm/tmux (which would open tmux's own menu).
-      const stopRightMouseForTerminal = (event: MouseEvent) => {
+      // Custom menu: xterm selection is not a DOM selection, so Chrome's
+      // native Copy item is disabled. Handle copy from xterm explicitly.
+      let menu: HTMLDivElement | null = null;
+      let pastePrompt: HTMLTextAreaElement | null = null;
+      const closeMenu = () => { menu?.remove(); menu = null; };
+      const closePastePrompt = () => { pastePrompt?.remove(); pastePrompt = null; };
+      const menuButton = (label: string, shortcut: string, handler: () => void, disabled = false) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.disabled = disabled;
+        button.style.cssText = 'display:flex;width:100%;justify-content:space-between;gap:30px;align-items:center;padding:9px 14px;border:0;background:transparent;color:inherit;text-align:left;font:13px sans-serif;cursor:pointer;';
+        if (disabled) button.style.opacity = '.45';
+        button.onmouseenter = () => { if (!disabled) button.style.background = '#3b3b3b'; };
+        button.onmouseleave = () => { button.style.background = 'transparent'; };
+        const text = document.createElement('span');
+        text.textContent = label;
+        const hint = document.createElement('span');
+        hint.textContent = shortcut;
+        hint.style.cssText = 'color:#aaa;font-size:12px;';
+        button.append(text, hint);
+        button.onclick = (event) => { event.stopPropagation(); closeMenu(); handler(); };
+        return button;
+      };
+      const showPastePrompt = () => {
+        closePastePrompt();
+        const textarea = document.createElement('textarea');
+        pastePrompt = textarea;
+        textarea.placeholder = 'Ctrl+V で貼り付け（Esc で閉じる）';
+        textarea.setAttribute('aria-label', 'Paste into terminal');
+        textarea.style.cssText = 'position:fixed;z-index:2147483647;top:40%;left:35%;width:30%;min-width:260px;min-height:80px;padding:12px;background:#202024;color:white;border:1px solid #777;border-radius:6px;font:14px sans-serif;';
+        textarea.addEventListener('paste', (event) => {
+          const value = event.clipboardData?.getData('text/plain');
+          if (value) {
+            event.preventDefault();
+            callbacksRef.current.onInput?.(value.replace(/\\r?\\n/g, '\\r'));
+            closePastePrompt();
+            terminal.focus();
+          }
+        });
+        textarea.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') { event.preventDefault(); closePastePrompt(); terminal.focus(); }
+        });
+        document.body.appendChild(textarea);
+        textarea.focus();
+      };
+      const pasteClipboard = async () => {
+        try {
+          if (!navigator.clipboard?.readText) { showPastePrompt(); return; }
+          const text = await navigator.clipboard.readText();
+          if (text) callbacksRef.current.onInput?.(text.replace(/\\r?\\n/g, '\\r'));
+          terminal.focus();
+        } catch {
+          showPastePrompt();
+        }
+      };
+      const showMenu = (event: MouseEvent) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeMenu();
+        const div = document.createElement('div');
+        menu = div;
+        div.setAttribute('role', 'menu');
+        div.style.cssText = 'position:fixed;z-index:2147483647;min-width:250px;padding:5px 0;border:1px solid #494949;border-radius:9px;background:#252525;color:#f5f5f5;box-shadow:0 12px 30px #0008;';
+        const selection = terminal.getSelection();
+        div.append(
+          menuButton('コピー', 'Ctrl+C', () => { void copyToClipboard(selection); terminal.focus(); }, !selection),
+          menuButton('貼り付け', 'Ctrl+V', () => { void pasteClipboard(); }),
+          menuButton('すべて選択', 'Ctrl+A', () => { terminal.selectAll(); terminal.focus(); }),
+        );
+        document.body.appendChild(div);
+        const rect = div.getBoundingClientRect();
+        div.style.left = Math.max(0, Math.min(event.clientX, window.innerWidth - rect.width - 4)) + 'px';
+        div.style.top = Math.max(0, Math.min(event.clientY, window.innerHeight - rect.height - 4)) + 'px';
+      };
+      const stopRightMouse = (event: MouseEvent) => {
         if (event.button === 2) event.stopImmediatePropagation();
       };
-      containerNode.addEventListener('mousedown', stopRightMouseForTerminal, true);
-      containerNode.addEventListener('mouseup', stopRightMouseForTerminal, true);
+      const onDocumentPointerDown = (event: PointerEvent) => {
+        if (menu && !menu.contains(event.target as Node)) closeMenu();
+      };
+      const onDocumentKeyDown = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') closeMenu();
+      };
+      containerNode.addEventListener('mousedown', stopRightMouse, true);
+      containerNode.addEventListener('mouseup', stopRightMouse, true);
+      containerNode.addEventListener('contextmenu', showMenu, true);
+      document.addEventListener('pointerdown', onDocumentPointerDown, true);
+      document.addEventListener('keydown', onDocumentKeyDown, true);
       cleanupContextMenu = () => {
-        containerNode.removeEventListener('mousedown', stopRightMouseForTerminal, true);
-        containerNode.removeEventListener('mouseup', stopRightMouseForTerminal, true);
+        closeMenu();
+        closePastePrompt();
+        containerNode.removeEventListener('mousedown', stopRightMouse, true);
+        containerNode.removeEventListener('mouseup', stopRightMouse, true);
+        containerNode.removeEventListener('contextmenu', showMenu, true);
+        document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+        document.removeEventListener('keydown', onDocumentKeyDown, true);
       };
 
       terminalInstance.current = terminal;
