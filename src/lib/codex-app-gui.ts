@@ -360,12 +360,22 @@ export class CodexGuiRuntime {
               reasoningEffort: asString(asRecord(effort).reasoningEffort),
               description: asString(asRecord(effort).description),
             })),
-          serviceTiers: (Array.isArray(value.serviceTiers) ? value.serviceTiers : [])
-            .map((tier) => ({
-              id: asString(asRecord(tier).id),
-              name: asString(asRecord(tier).name),
-              description: asString(asRecord(tier).description),
-            })),
+          serviceTiers: [
+            ...(Array.isArray(value.serviceTiers) ? value.serviceTiers : [])
+              .map((tier) => ({
+                id: asString(asRecord(tier).id),
+                name: asString(asRecord(tier).name),
+                description: asString(asRecord(tier).description),
+              })),
+            // Codex 0.160.x still includes a deprecated speed-tier list.
+            ...(
+              (Array.isArray(value.serviceTiers) ? value.serviceTiers : []).length === 0 &&
+              Array.isArray(value.additionalSpeedTiers)
+                ? value.additionalSpeedTiers.filter((tier) => tier === 'fast')
+                    .map(() => ({ id: 'fast', name: 'Fast', description: '' }))
+                : []
+            ),
+          ],
         };
       }).filter((model) => model.model);
       if (this.state.model && !this.state.models.some((item) => item.model === this.state.model)) {
