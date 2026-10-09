@@ -18,6 +18,6 @@ export const buildRemoteShellCommand = async (
   if (!workspace.remoteDirectory.startsWith('/') || workspace.remoteDirectory.includes('\\n')) {
     throw new Error('Remote directory must be an absolute path');
   }
-  const remote = `cd -- ${quote(workspace.remoteDirectory)} && ${initialCommand ? 'exec codex' : 'exec bash -l'}`;
+  const remote = `cd -- ${quote(workspace.remoteDirectory)} && ${initialCommand ? "exec bash -lic 'exec codex'" : 'exec bash -l'}`;
   return `ssh -tt -o BatchMode=yes -o ConnectTimeout=5 -p ${host.port} ${quote(host.username + '@' + host.address)} ${quote(remote)}`;
 };
