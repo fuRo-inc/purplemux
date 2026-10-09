@@ -3,6 +3,8 @@ import path from 'path';
 import os from 'os';
 import { nanoid } from 'nanoid';
 import { createSession, hasSession, killSession, resolveExistingDir, sendKeys, workspaceSessionName } from '@/lib/tmux';
+import { getWorkspaceById } from '@/lib/workspace-store';
+import { buildRemoteShellCommand } from '@/lib/remote-workspace';
 import { broadcastSync } from '@/lib/sync-server';
 import { createLogger } from '@/lib/logger';
 import {
@@ -301,9 +303,18 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
     const tabId = generateTabId();
     const sessionName = workspaceSessionName(wsId, paneId, tabId);
     if (!isWebBrowser) {
-      await createSession(sessionName, 80, 24, cwd);
-      if (command) {
-        await sendKeys(sessionName, command);
+      const workspace = await getWorkspaceById(wsId);
+      if (workspace?.hostId) {
+        if (panelType && panelType !== 'terminal' && panelType !== 'codex-cli') {
+          throw new Error('Remote workspace supports Terminal and Codex only');
+        }
+        await createSession(sessionName, 80, 24, undefined);
+        await sendKeys(sessionName, await buildRemoteShellCommand(workspace, panelType === 'codex-cli' ? 'codex' : undefined));
+      } else {
+        await createSession(sessionName, 80, 24, cwd);
+        if (command) {
+          await sendKeys(sessionName, command);
+        }
       }
     }
 
