@@ -1,8 +1,6 @@
 import { useState } from 'react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import useTabStore from '@/hooks/use-tab-store';
-import useWorkspaceStore from '@/hooks/use-workspace-store';
-import { useLayoutStore } from '@/hooks/use-layout';
 import { getAgentPanelTypeFromProvider, isAgentPanel, isAgentRunning, tryAgentSwitch } from '@/lib/agent-switch-lock';
 import { applyAgentCheckResult, type IAgentCheckResponse } from '@/lib/agent-check';
 import { cn } from '@/lib/utils';
@@ -59,8 +57,6 @@ const AgentModeSwitcher = ({
   onSwitchPanelType,
 }: IAgentModeSwitcherProps) => {
   const [open, setOpen] = useState(false);
-  const workspaceId = useLayoutStore((s) => s.workspaceId);
-  const isRemoteWorkspace = useWorkspaceStore((s) => s.workspaces.some((w) => w.id === workspaceId && !!w.hostId));
   const tabEntry = useTabStore((s) => s.tabs[tabId]);
   const runtimeAgentPanelType = getAgentPanelTypeFromProvider(tabEntry?.agentProviderId);
   const hasDetectedAgent = !!runtimeAgentPanelType
@@ -75,10 +71,7 @@ const AgentModeSwitcher = ({
       ? runtimeAgentPanelType
       : undefined;
   const currentMode = getCurrentMode(panelType);
-  const modeButtons: TModeButton[] = isRemoteWorkspace ? [
-    { type: 'terminal', label: 'Terminal' },
-    { type: 'codex-cli', label: 'Chat' },
-  ] : [
+  const modeButtons: TModeButton[] = [
     { type: 'terminal', label: 'Terminal' },
     ...(visibleAgentPanelType
       ? [{
@@ -107,8 +100,7 @@ const AgentModeSwitcher = ({
       setOpen(false);
       return;
     }
-    if (isRemoteWorkspace) setOpen(true);
-    else void refreshDetectedAgent().finally(() => setOpen(true));
+    void refreshDetectedAgent().finally(() => setOpen(true));
   };
 
   const handleSelectMode = (mode: TModeButton) => {
@@ -116,7 +108,7 @@ const AgentModeSwitcher = ({
       setOpen(false);
       return;
     }
-    if (!isRemoteWorkspace && !tryAgentSwitch({
+    if (!tryAgentSwitch({
       current: panelType,
       target: mode.type,
       cliState: tabEntry?.cliState,
