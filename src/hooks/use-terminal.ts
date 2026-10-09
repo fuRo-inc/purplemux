@@ -236,14 +236,9 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       const clipboardProvider: IClipboardProvider = {
         // OSC 52 read는 터미널 앱이 브라우저 클립보드를 훔쳐볼 수 있어 거부한다
         readText: () => '',
-        writeText: async (_selection, text) => {
-          if (!text) return;
-          const ok = await copyToClipboard(text);
-          if (ok) {
-            toast.success(callbacksRef.current.t('copyPaneSuccess'), { id: COPY_TOAST_ID, duration: 1500 });
-          }
-          // 실패 시 브라우저 권한/포커스 이슈는 조용히 무시
-        },
+        // Ignore OSC 52 clipboard writes from tmux or remote apps.
+        // Only explicit Ctrl+C / Cmd+C should copy selected terminal text.
+        writeText: async () => {},
       };
       terminal.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
 
