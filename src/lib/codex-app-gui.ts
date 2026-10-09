@@ -23,6 +23,7 @@ export type CodexGuiModel = {
   isDefault: boolean;
   defaultReasoningEffort: string;
   supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+  serviceTiers: { id: string; name: string; description: string }[];
 };
 export type CodexGuiApproval = { requestId: string | number; method: string; command: string; reason: string };
 export type CodexGuiSessionSummary = {
@@ -43,6 +44,8 @@ export type CodexGuiSessionPage = {
 };
 const THREAD_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+export type CodexGuiSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+export type CodexGuiApprovalPolicy = 'on-request' | 'never';
 export type CodexGuiState = {
   ready: boolean;
   running: boolean;
@@ -52,6 +55,9 @@ export type CodexGuiState = {
   turnId: string | null;
   model: string | null;
   effort: string | null;
+  sandboxMode: CodexGuiSandbox;
+  approvalPolicy: CodexGuiApprovalPolicy;
+  fastMode: boolean;
   models: CodexGuiModel[];
   items: CodexGuiItem[];
   approvals: CodexGuiApproval[];
@@ -82,7 +88,8 @@ export class CodexGuiRuntime {
   private closed = false;
   private state: CodexGuiState = {
     ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
-    model: null, effort: null, models: [], items: [], approvals: [], error: null,
+    model: null, effort: null, sandboxMode: 'workspace-write', approvalPolicy: 'on-request',
+    fastMode: false, models: [], items: [], approvals: [], error: null,
   };
 
   constructor(
@@ -126,6 +133,14 @@ export class CodexGuiRuntime {
       this.state.threadId = asString(stored.threadId) || null;
       this.state.model = asString(stored.model) || null;
       this.state.effort = asString(stored.effort) || null;
+      if (stored.sandboxMode === 'read-only' || stored.sandboxMode === 'workspace-write' ||
+          stored.sandboxMode === 'danger-full-access') {
+        this.state.sandboxMode = stored.sandboxMode;
+      }
+      if (stored.approvalPolicy === 'on-request' || stored.approvalPolicy === 'never') {
+        this.state.approvalPolicy = stored.approvalPolicy;
+      }
+      this.state.fastMode = stored.fastMode === true;
     } catch {
       // A new tab may have no prior App Server thread.
     }
@@ -137,6 +152,8 @@ export class CodexGuiRuntime {
     const temporary = filename + '.' + randomUUID() + '.tmp';
     await fs.writeFile(temporary, JSON.stringify({
       threadId: this.state.threadId, model: this.state.model, effort: this.state.effort,
+      sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy,
+      fastMode: this.state.fastMode,
     }), { encoding: 'utf8', mode: 0o600 });
     await fs.rename(temporary, filename);
   }
@@ -343,11 +360,24 @@ export class CodexGuiRuntime {
               reasoningEffort: asString(asRecord(effort).reasoningEffort),
               description: asString(asRecord(effort).description),
             })),
+          serviceTiers: (Array.isArray(value.serviceTiers) ? value.serviceTiers : [])
+            .map((tier) => ({
+              id: asString(asRecord(tier).id),
+              name: asString(asRecord(tier).name),
+              description: asString(asRecord(tier).description),
+            })),
         };
       }).filter((model) => model.model);
       if (this.state.model && !this.state.models.some((item) => item.model === this.state.model)) {
         this.state.model = null;
         this.state.effort = null;
+        this.state.fastMode = false;
+        await this.store();
+      }
+      const active = this.state.models.find((item) =>
+        item.model === (this.state.model || this.state.models.find((entry) => entry.isDefault)?.model));
+      if (this.state.fastMode && !active?.serviceTiers.some((tier) => tier.id === 'fast')) {
+        this.state.fastMode = false;
         await this.store();
       }
     } catch (error) {
@@ -356,7 +386,11 @@ export class CodexGuiRuntime {
     this.state.cwd = this.getWorkspaceCwd();
     if (this.state.threadId) {
       try {
-        const result = await this.request('thread/resume', { threadId: this.state.threadId }, 40000);
+        const result = await this.request('thread/resume', {
+          threadId: this.state.threadId,
+          approvalPolicy: this.state.approvalPolicy,
+          sandbox: this.state.sandboxMode,
+        }, 40000);
         this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || this.state.cwd;
         // thread/resume may return a summary rather than all messages.
         // Recover the transcript explicitly from the durable local/remote thread.
@@ -451,7 +485,11 @@ export class CodexGuiRuntime {
     this.state.error = null;
     this.publish();
     try {
-      const result = await this.request('thread/resume', { threadId }, 45000);
+      const result = await this.request('thread/resume', {
+        threadId,
+        approvalPolicy: this.state.approvalPolicy,
+        sandbox: this.state.sandboxMode,
+      }, 45000);
       const summary = asRecord(result.thread);
       let history = summary;
       try {
@@ -538,7 +576,8 @@ export class CodexGuiRuntime {
 
   async action(
     action: 'new-thread' | 'send' | 'interrupt' | 'approve' | 'settings' | 'resume-thread',
-    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: string; threadId?: string },
+    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: string; threadId?: string;
+      sandboxMode?: CodexGuiSandbox; approvalPolicy?: CodexGuiApprovalPolicy; fastMode?: boolean },
   ): Promise<CodexGuiState> {
     if (this.closed || !this.state.ready) throw new Error('Codex App Server is unavailable');
     if (action === 'resume-thread') return this.resumeThread(args.threadId || '');
@@ -558,10 +597,14 @@ export class CodexGuiRuntime {
       }
       return this.snapshot();
     }
+    if (this.state.busy) throw new Error('実行中は設定を変更できません');
+    const previous = {
+      model: this.state.model, effort: this.state.effort, fastMode: this.state.fastMode,
+      sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy,
+    };
     if (args.model !== undefined) {
       if (!this.state.models.some((m) => m.model === args.model)) throw new Error('Model is not available on this host');
       this.state.model = args.model;
-      // Changing model resets the suggested effort unless client supplies one.
       if (args.effort === undefined) this.state.effort = null;
     }
     if (args.effort !== undefined) {
@@ -571,12 +614,44 @@ export class CodexGuiRuntime {
       }
       this.state.effort = args.effort;
     }
-    await this.store();
+    if (args.sandboxMode !== undefined) {
+      if (!['read-only', 'workspace-write', 'danger-full-access'].includes(args.sandboxMode)) {
+        throw new Error('Invalid Sandbox setting');
+      }
+      this.state.sandboxMode = args.sandboxMode;
+    }
+    if (args.approvalPolicy !== undefined) {
+      if (!['on-request', 'never'].includes(args.approvalPolicy)) throw new Error('Invalid approval policy');
+      this.state.approvalPolicy = args.approvalPolicy;
+    }
+    const activeModel = this.state.models.find((m) =>
+      m.model === (this.state.model || this.state.models.find((x) => x.isDefault)?.model));
+    const fastSupported = activeModel?.serviceTiers.some((tier) => tier.id === 'fast') ?? false;
+    if (args.fastMode === true && !fastSupported) throw new Error('Fast is unavailable for this model on this host');
+    if (args.fastMode !== undefined) this.state.fastMode = args.fastMode;
+    else if (!fastSupported) this.state.fastMode = false;
+
+    try {
+      if (this.state.threadId &&
+          (previous.sandboxMode !== this.state.sandboxMode || previous.approvalPolicy !== this.state.approvalPolicy)) {
+        await this.request('thread/settings/update', {
+          threadId: this.state.threadId,
+          sandboxPolicy: { type: this.state.sandboxMode },
+          approvalPolicy: this.state.approvalPolicy,
+        }, 30000);
+      }
+      await this.store();
+    } catch (error) {
+      Object.assign(this.state, previous);
+      this.publish();
+      throw error;
+    }
     if (action === 'settings') { this.publish(); return this.snapshot(); }
     if (action === 'new-thread') {
       if (this.state.busy) throw new Error('Codex is working. Stop the current turn first.');
       this.state.threadId = null;
       this.state.cwd = this.getWorkspaceCwd();
+      this.state.fastMode = false;
       this.state.items = [];
       this.state.error = null;
       await this.store();
@@ -597,7 +672,8 @@ export class CodexGuiRuntime {
           const cwd = this.getWorkspaceCwd();
           if (!cwd.startsWith('/')) throw new Error('Codex workspace directory must be absolute');
           const result = await this.request('thread/start', {
-            cwd, approvalPolicy: 'on-request', sandbox: 'workspace-write',
+            cwd, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandboxMode,
+            serviceTier: this.state.fastMode ? 'fast' : 'default',
             ...(this.state.model ? { model: this.state.model } : {}),
           }, 45000);
           const id = asString(asRecord(result.thread).id);
@@ -614,6 +690,7 @@ export class CodexGuiRuntime {
           input: [{ type: 'text', text, text_elements: [] }],
           ...(this.state.model ? { model: this.state.model } : {}),
           ...(this.state.effort ? { effort: this.state.effort } : {}),
+          serviceTierForTurn: this.state.fastMode ? 'fast' : 'default',
         }, 45000);
         this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;
       } catch (error) {
