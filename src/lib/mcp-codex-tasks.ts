@@ -185,19 +185,9 @@ const execute = async (record: TaskRecord, instruction: string): Promise<void> =
         (!before.cwd || normalizeDirectory(before.cwd) !== record.directory)) {
       return fail('Codex thread working directory differs from the confirmed target. Choose a new thread explicitly.');
     }
-    // Switch threads BEFORE changing permissions. New-task requests must not
-    // mutate the old thread's sandbox or approval settings.
-    if (record.mode === 'new') await runtime.action('new-thread', {});
-    // The default is read-only. Workspace writes require a separate explicit
-    // request; Full Access and no-approval policies are never available via MCP.
-    await runtime.action('settings', {
-      sandboxMode: record.sandboxMode, approvalPolicy: 'on-request',
+    const result = await runtime.runTask({
+      text: instruction, mode: record.mode, sandboxMode: record.sandboxMode, directory: record.directory, hostId: record.hostId,
     });
-    const configured = runtime.snapshot();
-    if (configured.cwd && normalizeDirectory(configured.cwd) !== record.directory) {
-      return fail('Codex working directory changed before task submission');
-    }
-    const result = await runtime.action('send', { text: instruction });
     record.threadId = result.threadId;
     record.turnId = result.turnId || result.lastTurnId;
     const lastUser = [...result.items].reverse().find((item) => item.type === 'user');
@@ -275,7 +265,7 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
   if (activeTabs.has(tabKey)) return fail('A Codex task is already being submitted to this tab');
   // Avoid queued requests racing with already-running browser tasks.
   const live = await peekCodexGuiRuntime(workspaceId, tabId);
-  if (live?.busy) return fail('Codex is already running a turn in this tab');
+  if (live?.busy || live?.taskPermissionsActive) return fail('Codex is already running a turn in this tab');
   activeTabs.add(tabKey);
   const record: TaskRecord = {
     taskId, idempotencyKey, instructionHash: hash,

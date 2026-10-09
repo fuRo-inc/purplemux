@@ -3,7 +3,7 @@ import { Check, CircleStop, FileDiff, History, LoaderCircle, MessageSquare, Plus
 import { Button } from '@/components/ui/button';
 import AssistantMessageItem from '@/components/features/timeline/assistant-message-item';
 import UserMessageItem from '@/components/features/timeline/user-message-item';
-import type { CodexGuiState, CodexGuiItem, CodexGuiSandbox, CodexGuiApprovalPolicy } from '@/lib/codex-app-gui';
+import type { CodexGuiState, CodexGuiItem, CodexGuiSandbox, CodexGuiApprovalPolicy, CodexGuiApprovalDecision } from '@/lib/codex-app-gui';
 import CodexSessionPicker from '@/components/features/workspace/codex-session-picker';
 
 interface ICodexAppChatPanelProps {
@@ -173,7 +173,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
     }
   };
 
-  const respondApproval = async (requestId: string | number, decision: 'accept' | 'decline') => {
+  const respondApproval = async (requestId: string | number, decision: CodexGuiApprovalDecision) => {
     try {
       await request('approve', { requestId, decision });
     } catch (error) {
@@ -222,7 +222,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
         <Button size="xs" variant="outline" disabled={!connected || !state.ready} onClick={() => setSessionsOpen(true)} title="以前のCodexセッションを検索">
           <History className="h-3 w-3" /> {!mobile && '以前の会話'}
         </Button>
-        <Button size="xs" variant="outline" disabled={!connected || state.busy} onClick={() => void run('new-thread')}>
+        <Button size="xs" variant="outline" disabled={!connected || state.busy || state.taskPermissionsActive} onClick={() => void run('new-thread')}>
           <Plus className="h-3 w-3" /> {!mobile && '新しい会話'}
         </Button>
       </div>
@@ -235,7 +235,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 min-w-0 max-w-56 flex-1 rounded-md border bg-background px-2 text-xs"
             value={selectedModel}
             onChange={(event) => changeModel(event.target.value)}
-            disabled={!connected || state.models.length === 0 || state.busy || settingBusy}
+            disabled={!connected || state.models.length === 0 || state.busy || state.taskPermissionsActive || settingBusy}
           >
             {state.models.length === 0 && <option value="">取得中…</option>}
             {state.models.map((option) => (
@@ -250,7 +250,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 max-w-32 rounded-md border bg-background px-2 text-xs"
             value={selectedEffort}
             onChange={(event) => changeEffort(event.target.value)}
-            disabled={!connected || effortOptions.length === 0 || state.busy || settingBusy}
+            disabled={!connected || effortOptions.length === 0 || state.busy || state.taskPermissionsActive || settingBusy}
           >
             {effortOptions.length === 0 && <option value="">Default</option>}
             {effortOptions.map((option) => (
@@ -266,7 +266,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 max-w-44 rounded-md border bg-background px-2 text-xs"
             value={state.sandboxMode}
             onChange={(event) => changeSandbox(event.target.value as CodexGuiSandbox)}
-            disabled={!connected || state.busy || settingBusy}
+            disabled={!connected || state.busy || state.taskPermissionsActive || settingBusy}
           >
             <option value="read-only">Read only</option>
             <option value="workspace-write">Workspace write</option>
@@ -280,7 +280,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             className="h-8 max-w-36 rounded-md border bg-background px-2 text-xs"
             value={state.approvalPolicy}
             onChange={(event) => changeApproval(event.target.value as CodexGuiApprovalPolicy)}
-            disabled={!connected || state.busy || settingBusy}
+            disabled={!connected || state.busy || state.taskPermissionsActive || settingBusy}
             title="Neverでは許可要求を表示せず、許可が必要な操作を拒否します"
           >
             <option value="on-request">Ask when needed</option>
@@ -298,12 +298,17 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             aria-label="Codex Fastモード"
             className="h-4 w-4 accent-foreground"
             checked={state.fastMode}
-            disabled={!connected || state.busy || settingBusy}
+            disabled={!connected || state.busy || state.taskPermissionsActive || settingBusy}
             onChange={(event) => changeFast(event.target.checked)}
           />
           <span className="text-[11px] text-muted-foreground">{state.fastMode ? (fastAvailable ? 'ON' : 'ON（未確認）') : 'OFF'}</span>
         </label>
       </div>
+      <p className="shrink-0 border-b px-3 pb-2 text-xs text-muted-foreground">
+        Sandboxはアクセス範囲、Approvalは範囲外の操作への確認です。nvidia-smiなどGPUの照会でも確認が必要な場合があります。
+        Neverは追加承認の拒否です。Full Accessはホストのファイル・コマンドへの制限を解除するため危険です。
+        {state.taskPermissionsActive && ' MCP一時タスクの権限を適用中です。保存済みのGUI設定はタスク後に復帰します。'}
+      </p>
       {state.sandboxMode === 'danger-full-access' && (
         <p className="shrink-0 border-b px-3 pb-2 text-xs text-amber-400">
           Full Access：選択したHostのSandbox制限が解除されています。
@@ -326,10 +331,19 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
               <div className="font-semibold">Codexが操作の承認を要求しています</div>
               <p className="text-xs text-muted-foreground">{approval.reason}</p>
               <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 text-xs">{approval.command}</pre>
-              <div className="flex justify-end gap-2">
-                <Button size="sm" variant="outline" onClick={() => void respondApproval(approval.requestId, 'decline')}>拒否</Button>
-                <Button size="sm" onClick={() => void respondApproval(approval.requestId, 'accept')}>今回だけ許可</Button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {(approval.availableDecisions || []).map((decision, index) => (
+                  <Button key={index} size="sm" variant="outline"
+                    onClick={() => void respondApproval(approval.requestId, decision)}>
+                    {typeof decision === 'string'
+                      ? ({ accept: '今回だけ許可', acceptForSession: 'このセッション中は許可', decline: '拒否', cancel: 'キャンセル' }[decision])
+                      : 'acceptWithExecpolicyAmendment' in decision
+                        ? '提案されたコマンドルールを許可: ' + JSON.stringify(decision.acceptWithExecpolicyAmendment.execpolicy_amendment)
+                        : '提案されたネットワークルールを適用: ' + JSON.stringify(decision.applyNetworkPolicyAmendment.network_policy_amendment)}
+                  </Button>
+                ))}
               </div>
+              <p className="text-xs text-muted-foreground">セッション許可は後続ターンにも適用されます。提案ルールは今後の承認にも影響するため、具体的な対象を確認してください。</p>
             </div>
           ))}
           {(actionError || state.error) && (

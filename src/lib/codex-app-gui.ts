@@ -25,7 +25,16 @@ export type CodexGuiModel = {
   supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
   serviceTiers: { id: string; name: string; description: string }[];
 };
-export type CodexGuiApproval = { requestId: string | number; method: string; command: string; reason: string };
+export type CodexGuiApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel' |
+  { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } |
+  { applyNetworkPolicyAmendment: { network_policy_amendment: { host: string; action: 'allow' | 'deny' } } };
+export type CodexGuiApproval = {
+  requestId: string | number; method: string; command: string; reason: string;
+  threadId?: string; turnId?: string;
+  availableDecisions?: CodexGuiApprovalDecision[];
+  proposedExecpolicyAmendment?: string[];
+  proposedNetworkPolicyAmendments?: { host: string; action: 'allow' | 'deny' }[];
+};
 export type CodexGuiSessionSummary = {
   id: string;
   preview: string;
@@ -71,6 +80,7 @@ export type CodexGuiState = {
   sandboxMode: CodexGuiSandbox;
   approvalPolicy: CodexGuiApprovalPolicy;
   fastMode: boolean;
+  taskPermissionsActive?: boolean;
   models: CodexGuiModel[];
   items: CodexGuiItem[];
   approvals: CodexGuiApproval[];
@@ -92,7 +102,22 @@ const asString = (value: unknown): string =>
   typeof value === 'string' ? value : '';
 const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 
+const canonicalJson = (value: unknown): string => JSON.stringify(value, (_key, entry) =>
+  entry && typeof entry === 'object' && !Array.isArray(entry)
+    ? Object.fromEntries(Object.keys(entry).sort().map((key) => [key, entry[key]])) : entry);
+const decisionsEqual = (left: unknown, right: unknown): boolean => canonicalJson(left) === canonicalJson(right);
+
 export class CodexGuiRuntime {
+  // Serialize asynchronous actions, including the entire MCP setup/send transaction.
+  private actions: Promise<unknown> = Promise.resolve();
+  private taskTurnId: string | null = null;
+  private earlyTaskCompletions = new Map<string, Json>();
+  private temporaryPermissions: { sandboxMode: CodexGuiSandbox; approvalPolicy: CodexGuiApprovalPolicy } | null = null;
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.actions.catch(() => {}).then(operation);
+    this.actions = next;
+    return next;
+  }
   private child: ChildProcessWithoutNullStreams | null = null;
   private pending = new Map<number, PendingCall>();
   private listeners = new Set<(state: CodexGuiState) => void>();
@@ -107,17 +132,20 @@ export class CodexGuiRuntime {
     fastMode: false, models: [], items: [], approvals: [], error: null,
   };
 
+  private readonly executionHostId: string;
+
   constructor(
     private readonly workspace: IWorkspace,
     private readonly tab: ITab,
-  ) {}
+  ) { this.executionHostId = workspace.hostId || 'local'; }
 
   snapshot(): CodexGuiState {
     return {
       ...this.state,
       models: [...this.state.models],
       items: this.state.items.map((item) => ({ ...item })),
-      approvals: [...this.state.approvals],
+      approvals: structuredClone(this.state.approvals),
+      taskPermissionsActive: this.temporaryPermissions !== null,
     };
   }
 
@@ -171,7 +199,8 @@ export class CodexGuiRuntime {
     const temporary = filename + '.' + randomUUID() + '.tmp';
     await fs.writeFile(temporary, JSON.stringify({
       threadId: this.state.threadId, model: this.state.model, effort: this.state.effort,
-      sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy,
+      sandboxMode: this.temporaryPermissions?.sandboxMode ?? this.state.sandboxMode,
+      approvalPolicy: this.temporaryPermissions?.approvalPolicy ?? this.state.approvalPolicy,
       fastMode: this.state.fastMode,
     }), { encoding: 'utf8', mode: 0o600 });
     await fs.rename(temporary, filename);
@@ -223,11 +252,21 @@ export class CodexGuiRuntime {
     if (method === 'turn/started') {
       const turn = asRecord(params.turn);
       this.state.turnId = asString(turn.id) || null;
+      if (this.temporaryPermissions && this.state.busy) this.taskTurnId = this.state.turnId;
       this.state.busy = true;
       this.lastTurnDiff = null;
     } else if (method === 'turn/completed') {
       const turn = asRecord(params.turn);
-      this.state.lastTurnId = asString(turn.id) || this.state.turnId;
+      const completedId = asString(turn.id) || this.state.turnId;
+      if (this.temporaryPermissions && !this.taskTurnId) {
+        // turn/start can answer after completion. Match its returned ID before
+        // restoring permissions; a delayed completion from an older turn cannot release the lease.
+        if (completedId && this.earlyTaskCompletions.size < 10) this.earlyTaskCompletions.set(completedId, params);
+        return;
+      }
+      if (this.state.turnId && completedId !== this.state.turnId) return;
+      if (this.temporaryPermissions && completedId !== this.taskTurnId) return;
+      this.state.lastTurnId = completedId;
       this.state.lastTurnStatus = asString(turn.status) || 'unknown';
       this.state.busy = false;
       this.state.turnId = null;
@@ -235,6 +274,9 @@ export class CodexGuiRuntime {
         this.state.error = asString(asRecord(turn.error).message) || 'Codex turn failed';
       }
       this.state.approvals = [];
+      if (this.temporaryPermissions) {
+        void this.serialize(() => this.restoreTaskPermissions()).catch(() => {});
+      }
     } else if (method === 'turn/diff/updated') {
       const diff = asString(params.diff);
       const turnId = asString(params.turnId) || this.state.turnId;
@@ -307,14 +349,56 @@ export class CodexGuiRuntime {
     if ((typeof id === 'number' || typeof id === 'string') && method) {
       // Requests from the App Server are approval prompts. Never approve automatically.
       const params = asRecord(message.params);
-      if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
-        this.state.approvals.push({
-          requestId: id, method,
-          command: asString(params.command) || asString(params.reason) || 'ファイル変更',
-          reason: asString(params.reason),
-        });
+      if (method === 'item/permissions/requestApproval') {
+        // The protocol grants a subset via { permissions, scope }, not a decision.
+        // Until a subset editor is supported, explicitly grant nothing; never hang.
+        this.sendMessage({ id, result: { permissions: {}, scope: 'turn' } });
+        this.state.error = '追加権限要求は未対応のため拒否しました（権限は付与していません）';
+        this.publish();
+      } else if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+        const wrongScope = (params.threadId !== undefined && params.threadId !== this.state.threadId) ||
+          (params.turnId !== undefined && params.turnId !== this.state.turnId);
+        if (wrongScope || this.state.approvalPolicy === 'never') {
+          this.sendMessage({ id, result: { decision: 'decline' } });
+          return;
+        }
+        const commandApproval = method === 'item/commandExecution/requestApproval';
+        const proposed = params.proposedExecpolicyAmendment;
+        const exec = commandApproval && Array.isArray(proposed) && proposed.length > 0 &&
+          proposed.every((part) => typeof part === 'string' && part.length > 0)
+          ? proposed as string[] : undefined;
+        const network = commandApproval && Array.isArray(params.proposedNetworkPolicyAmendments)
+          ? params.proposedNetworkPolicyAmendments.filter((raw): raw is { host: string; action: 'allow' | 'deny' } => {
+            const rule = asRecord(raw);
+            return Object.keys(rule).length === 2 && typeof rule.host === 'string' && rule.host.length > 0 &&
+              (rule.action === 'allow' || rule.action === 'deny');
+          }) : [];
+        const candidates: CodexGuiApprovalDecision[] = ['accept', 'acceptForSession', 'decline', 'cancel'];
+        if (exec) candidates.push({ acceptWithExecpolicyAmendment: { execpolicy_amendment: exec } });
+        for (const rule of network) candidates.push({ applyNetworkPolicyAmendment: { network_policy_amendment: rule } });
+        // An explicit list is authoritative. Unknown/malformed candidates grant nothing.
+        const offered = params.availableDecisions;
+        const available = offered === undefined || offered === null ? candidates
+          : Array.isArray(offered) ? candidates.filter((candidate) =>
+            offered.some((value) => decisionsEqual(value, candidate))) : [];
+        if (!available.length) {
+          this.sendMessage({ id, result: { decision: 'decline' } });
+          this.state.error = '対応可能な承認候補がないため拒否しました';
+        } else {
+          const context = asRecord(params.networkApprovalContext);
+          this.state.approvals.push({
+            requestId: id, method,
+            threadId: asString(params.threadId), turnId: asString(params.turnId),
+            command: asString(context.host) ? 'Network: ' + asString(context.protocol) + ' ' + asString(context.host)
+              : asString(params.command) || asString(params.reason) || 'ファイル変更',
+            reason: asString(params.reason), availableDecisions: available,
+            proposedExecpolicyAmendment: exec, proposedNetworkPolicyAmendments: network,
+          });
+        }
         this.publish();
       } else {
+        // Unsupported RPCs must receive an error so the server can fail closed.
+        this.sendMessage({ id, error: { code: -32601, message: 'Unsupported Codex request: ' + method } });
         this.state.error = '未対応のCodex確認要求: ' + method;
         this.publish();
       }
@@ -531,6 +615,13 @@ export class CodexGuiRuntime {
   }
 
   async resumeThread(threadId: string): Promise<CodexGuiState> {
+    return this.serialize(async () => {
+      if (this.temporaryPermissions) throw new Error('MCP task permissions are active');
+      return this.resumeThreadInternal(threadId);
+    });
+  }
+
+  private async resumeThreadInternal(threadId: string): Promise<CodexGuiState> {
     if (!this.state.ready || this.closed) throw new Error('Codex App Server is unavailable');
     if (!THREAD_ID_RE.test(threadId)) throw new Error('Invalid Codex session ID');
     if (this.state.busy || this.state.approvals.length > 0) {
@@ -632,6 +723,13 @@ export class CodexGuiRuntime {
     this.state.ready = false;
     this.state.busy = false;
     this.state.error = message;
+    if (this.temporaryPermissions) {
+      Object.assign(this.state, this.temporaryPermissions);
+      this.temporaryPermissions = null;
+      this.taskTurnId = null;
+      this.earlyTaskCompletions.clear();
+    }
+    this.state.approvals = [];
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error(message));
@@ -640,16 +738,96 @@ export class CodexGuiRuntime {
     this.publish();
   }
 
-  async action(
+  /** MCP permissions are ephemeral and exclusively own this tab until restoration. */
+  async runTask(options: {
+    text: string; mode: 'new' | 'continue'; sandboxMode: 'read-only' | 'workspace-write'; directory: string; hostId: string;
+  }): Promise<CodexGuiState> {
+    return this.serialize(async () => {
+      if (this.closed || !this.state.ready || this.state.busy || this.temporaryPermissions || this.state.approvals.length) {
+        throw new Error('Codex is already working or unavailable');
+      }
+      if (options.hostId !== this.executionHostId) throw new Error('Codex runtime host differs from the confirmed target');
+      if (!['read-only', 'workspace-write'].includes(options.sandboxMode)) throw new Error('Invalid task sandbox');
+      const normalize = (cwd: string) => cwd.replace(/\/+$/, '') || '/';
+      if (normalize(this.getWorkspaceCwd()) !== options.directory ||
+          (options.mode === 'continue' && this.state.threadId && normalize(this.state.cwd || '') !== options.directory)) {
+        throw new Error('Codex thread working directory differs from the confirmed target');
+      }
+      this.taskTurnId = null;
+      this.earlyTaskCompletions.clear();
+      this.temporaryPermissions = {
+        sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy,
+      };
+      try {
+        // New tasks must not change the old thread's permissions.
+        if (options.mode === 'new') await this.actionInternal('new-thread', {});
+        if (this.state.threadId) {
+          // Acknowledgement is mandatory even when the local values already match.
+          await this.request('thread/settings/update', {
+            threadId: this.state.threadId,
+            sandboxPolicy: { type: toCodexAppSandboxPolicyType(options.sandboxMode) },
+            approvalPolicy: 'on-request',
+          }, 30000);
+        }
+        this.state.sandboxMode = options.sandboxMode;
+        this.state.approvalPolicy = 'on-request';
+        return await this.actionInternal('send', { text: options.text });
+      } catch (error) {
+        // A timed-out turn/start may still be running remotely. Disconnect rather
+        // than restoring broader GUI permissions to an unobserved active task.
+        if (this.state.error) this.terminate();
+        else await this.restoreTaskPermissions();
+        throw error;
+      }
+    });
+  }
+
+  private async restoreTaskPermissions(): Promise<void> {
+    const saved = this.temporaryPermissions;
+    if (!saved) return;
+    try {
+      // Always send a restoration even if local rollback made values equal.
+      if (this.state.threadId && !this.closed) {
+        await this.request('thread/settings/update', {
+          threadId: this.state.threadId,
+          sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
+          approvalPolicy: saved.approvalPolicy,
+        }, 30000);
+      }
+      Object.assign(this.state, saved);
+      this.temporaryPermissions = null;
+      this.taskTurnId = null;
+      this.earlyTaskCompletions.clear();
+      this.publish();
+    } catch (error) {
+      this.terminate();
+      this.state.error = 'MCP task permission restoration failed; disconnected: ' + String(error);
+      this.publish();
+      throw error;
+    }
+  }
+
+  action(...args: Parameters<CodexGuiRuntime['actionInternal']>): Promise<CodexGuiState> {
+    return this.serialize(async () => {
+      if (this.temporaryPermissions && args[0] !== 'approve' && args[0] !== 'interrupt') {
+        throw new Error('MCP task permissions are active');
+      }
+      return this.actionInternal(...args);
+    });
+  }
+
+  private async actionInternal(
     action: 'new-thread' | 'send' | 'interrupt' | 'approve' | 'settings' | 'resume-thread',
-    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: string; threadId?: string;
+    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: unknown; threadId?: string;
       sandboxMode?: CodexGuiSandbox; approvalPolicy?: CodexGuiApprovalPolicy; fastMode?: boolean },
   ): Promise<CodexGuiState> {
     if (this.closed || !this.state.ready) throw new Error('Codex App Server is unavailable');
-    if (action === 'resume-thread') return this.resumeThread(args.threadId || '');
+    if (action === 'resume-thread') return this.resumeThreadInternal(args.threadId || '');
     if (action === 'approve') {
       const match = this.state.approvals.find((entry) => String(entry.requestId) === String(args.requestId));
-      if (!match || (args.decision !== 'accept' && args.decision !== 'decline')) {
+      if (!match || !match.availableDecisions?.some((candidate) => decisionsEqual(candidate, args.decision)) ||
+          (match.threadId && match.threadId !== this.state.threadId) ||
+          (match.turnId && match.turnId !== this.state.turnId)) {
         throw new Error('Invalid or expired approval request');
       }
       this.sendMessage({ id: match.requestId, result: { decision: args.decision } });
@@ -751,7 +929,10 @@ export class CodexGuiRuntime {
           const id = asString(asRecord(result.thread).id);
           if (!id) throw new Error('Codex did not return a thread ID');
           this.state.threadId = id;
-          this.state.cwd = cwd;
+          this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || cwd;
+          if (this.temporaryPermissions && this.state.cwd.replace(/\/+$/, '') !== cwd.replace(/\/+$/, '')) {
+            throw new Error('Codex working directory changed before task submission');
+          }
           await this.store();
         }
         this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
@@ -764,6 +945,13 @@ export class CodexGuiRuntime {
           ...(this.state.effort ? { effort: this.state.effort } : {}),
           serviceTierForTurn: this.state.fastMode ? requestedFastTier : 'default',
         }, 45000);
+        if (this.temporaryPermissions) {
+          this.taskTurnId = asString(asRecord(response.turn).id) || this.taskTurnId;
+          if (!this.taskTurnId) throw new Error('Codex did not return a task turn ID');
+          const completed = this.earlyTaskCompletions.get(this.taskTurnId);
+          this.earlyTaskCompletions.clear();
+          if (completed) this.handleNotification('turn/completed', completed);
+        }
         // A very short turn can complete before turn/start responds.
         // Do not resurrect its active turn ID after turn/completed.
         if (this.state.busy) this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;

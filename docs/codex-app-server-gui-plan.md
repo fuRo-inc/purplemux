@@ -141,3 +141,19 @@ stdin/stdoutの1行単位JSONをCLIのログ出力と混同しない。stderrは
 - Fast は **OFFが初期値**。モデル一覧にFast/priority tierが記載される場合はそれを要求する。一覧に記載がないときもユーザーが警告を確認した場合に限り `priority` を試行可能にする。未広告の場合の表示は「ON（未確認）」であり、加速を保証しない。
 - 新規会話・既存会話の `turn/start` に `serviceTierForTurn` を指定。対応しないモデル・アカウントのエラーはGUIへ明示し、黙ってFastが機能したと扱わない。
 - NUC／GMKtec実機検証、TypeScriptの型チェックは利用者端末で要実施。特に非HTTPS上の `Ctrl+V` と、fast tierが提供されないモデルでのON時のエラー表示を確認する。
+
+
+## 2026-10-10: MCP一時権限と承認選択肢
+
+- GUIのSandbox/Approvalは永続設定。MCPタスクは独立した一時設定として実行し、保存ファイルにはGUI設定を維持する。実行開始から完了後の復元確認まで同じタブの送信・設定変更・履歴切り替えを禁止する。
+- 継続タスクは実際のスレッドcwdと接続Hostを再確認し、`thread/settings/update`の成功確認後だけ送信する。新規タスクは旧スレッドの権限を変えず、`thread/start`へ一時設定を渡す。MCPの標準はread-only、workspace-writeにはconfirmWriteAccess、Full Accessは不可。承認ポリシーは必ずon-request。既存のHost/cwd確認、MCP書き込み・承認の別々の有効化条件を維持する。
+- 完了・失敗・中断後はGUI設定をApp Serverへ復元する。復元失敗や送信結果が不明な場合は切断して後続実行を拒否する。プロセス終了時はメモリもGUI設定へ戻し、再接続は保存済みのGUI設定でresumeする。
+- Command/file approvalは「今回だけ」「このセッション中」「拒否」「キャンセル」。commandは提案されたexecpolicy/networkルールも扱う。availableDecisionsがあればその候補だけを表示・受理する。ルールは提案内容との完全一致が必要で、追加・変更された内容、未知Decision、別スレッドや終了済みターンへの回答を拒否する。セッション許可は後続ターンにも、ルール許可は将来の承認にも影響するので明示選択が必要。MCP APIは従来のaccept/declineのみを維持する。
+- `item/permissions/requestApproval`はdecision形式ではない。要求のpermissionsに対しresponseはpermissionsの許可サブセットとscope（turn/session）を返す。安全なサブセット編集UIは未対応なので、現時点では`{ permissions: {}, scope: "turn" }`で追加権限を明示拒否し、GUIへ理由を表示する。未知のserver requestにもJSON-RPCエラーを返し、承認待ちのまま固着させない。
+- Sandboxは実行時のアクセス範囲、Approvalは制限を超える操作を確認する仕組み。例えばnvidia-smiによるGPU照会もデバイスアクセスのため承認が必要な場合がある。Approval neverは追加承認を拒否する設定で、自動許可ではない。Full AccessはSandbox制限を解除してホストへのアクセスを広げる危険な設定であり、GPU照会のために安易に選ばない。
+
+プロトコルの根拠: [公式App Serverドキュメント](https://developers.openai.com/codex/app-server)のApprovals / Permission requests、およびローカルの公式Codex CLI 0.160.0の`codex app-server generate-ts`で生成したv2型（CommandExecutionApprovalDecision、CommandExecutionRequestApprovalParams、PermissionsRequestApprovalParams/Response）。availableDecisionsはバージョンによって省略されるため、未指定時は対応する既知のDecisionと実際の提案だけを扱う。
+
+試験はRPCと保存ファイルを模擬して実施する。本番のApp Serverやサービスには接続しない。実機ブラウザでの表示・実際のCodex/GPU操作はこのローカル回帰試験には含まれない。
+
+全テストのログ書き込みも本番と隔離する場合、テスト専用のNode preloadで`require('node:os').homedir = () => '/tmp/purplemux-permissions-test-home'`を指定し、`vitest run --execArgv=--require=/tmp/purplemux-permissions-test-home.cjs`で各ワーカーへ適用する。通常のホームディレクトリや環境変数HOMEは変更しない。権限回帰テスト自身の保存処理はメモリ上のファイルシステムで検証する。
