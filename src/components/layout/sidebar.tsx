@@ -5,6 +5,7 @@ import {
   ChevronsRight,
   Plus,
   FolderPlus,
+  Server,
   Settings,
   LogOut,
 } from 'lucide-react';
@@ -35,6 +36,10 @@ import dynamic from 'next/dynamic';
 
 const SettingsDialog = dynamic(
   () => import('@/components/features/workspace/settings-dialog'),
+  { ssr: false },
+);
+const RemoteWorkspaceDialog = dynamic(
+  () => import('@/components/features/workspace/remote-workspace-dialog'),
   { ssr: false },
 );
 const CheatSheetDialog = dynamic(
@@ -112,6 +117,7 @@ const Sidebar = () => {
   }, [setSettingsOpen]);
 
   const [isCreating, setIsCreating] = useState(false);
+  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<IWorkspace | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [fadingOutIds, setFadingOutIds] = useState<Set<string>>(new Set());
@@ -604,7 +610,10 @@ const Sidebar = () => {
                 aria-label={t('addWorkspace')}
               >
                 <Plus className="h-3.5 w-3.5" />
-                Workspace
+                Local
+              </button>
+              <button className="flex items-center gap-1 border-l border-sidebar-border px-2 text-xs text-muted-foreground hover:bg-sidebar-accent" onClick={() => setRemoteDialogOpen(true)} title="New Remote Workspace">
+                <Server className="h-3.5 w-3.5" /> Remote
               </button>
               <ShortcutKey
                 mac="⌘N"
@@ -765,6 +774,7 @@ const Sidebar = () => {
       )}
 
       {settingsOpen && <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />}
+      <RemoteWorkspaceDialog open={remoteDialogOpen} onOpenChange={setRemoteDialogOpen} onCreated={selectWorkspace} />
       <CheatSheetDialog />
 
       <AlertDialog
