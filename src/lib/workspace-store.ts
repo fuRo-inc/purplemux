@@ -2,7 +2,9 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { nanoid } from 'nanoid';
-import { listSessions, killSession } from '@/lib/tmux';
+import { listSessions, killSession, sendKeys } from '@/lib/tmux';
+import { getRemoteHost } from '@/lib/remote-host-store';
+import { buildRemoteShellCommand } from '@/lib/remote-workspace';
 import { createLogger } from '@/lib/logger';
 import { broadcastSync } from '@/lib/sync-server';
 import {
@@ -302,8 +304,12 @@ export const getWorkspaceById = async (wsId: string): Promise<IWorkspace | undef
   return data?.workspaces.find((w) => w.id === wsId);
 };
 
-export const createWorkspace = async (directory: string, name?: string, layoutOptions?: ICreateLayoutOptions): Promise<IWorkspace> =>
+export const createWorkspace = async (directory: string, name?: string, layoutOptions?: ICreateLayoutOptions, remote?: { hostId: string; remoteDirectory: string }): Promise<IWorkspace> =>
   withLock(async () => {
+    if (remote) {
+      if (!await getRemoteHost(remote.hostId)) throw new Error('Remote host not found');
+      if (!remote.remoteDirectory.startsWith('/') || remote.remoteDirectory.includes('\n')) throw new Error('Remote directory must be absolute');
+    }
     let stat;
     try {
       stat = await fs.stat(directory);
@@ -324,7 +330,11 @@ export const createWorkspace = async (directory: string, name?: string, layoutOp
     await fs.mkdir(resolveLayoutDir(wsId), { recursive: true });
     await writeLayoutFile(layout, resolveLayoutFile(wsId));
 
-    const workspace: IWorkspace = { id: wsId, name: wsName, directories: [directory] };
+    const workspace: IWorkspace = { id: wsId, name: wsName, directories: [directory], ...(remote ? { hostId: remote.hostId, remoteDirectory: remote.remoteDirectory } : {}) };
+    if (remote) {
+      const tab = collectAllTabs(layout.root)[0];
+      if (tab) await sendKeys(tab.sessionName, await buildRemoteShellCommand(workspace));
+    }
     data.workspaces.push(workspace);
     await writeWorkspacesFile(data);
     await writeWorkspacePrompts(workspace);
