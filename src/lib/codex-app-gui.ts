@@ -25,11 +25,30 @@ export type CodexGuiModel = {
   supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
 };
 export type CodexGuiApproval = { requestId: string | number; method: string; command: string; reason: string };
+export type CodexGuiSessionSummary = {
+  id: string;
+  preview: string;
+  cwd: string;
+  createdAt: number;
+  updatedAt: number;
+  model: string | null;
+  source: string;
+  status: string;
+};
+export type CodexGuiSessionPage = {
+  sessions: CodexGuiSessionSummary[];
+  nextCursor: string | null;
+  currentThreadId: string | null;
+  workspaceCwd: string;
+};
+const THREAD_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 export type CodexGuiState = {
   ready: boolean;
   running: boolean;
   busy: boolean;
   threadId: string | null;
+  cwd: string | null;
   turnId: string | null;
   model: string | null;
   effort: string | null;
@@ -62,7 +81,7 @@ export class CodexGuiRuntime {
   private seq = 0;
   private closed = false;
   private state: CodexGuiState = {
-    ready: false, running: false, busy: false, threadId: null, turnId: null,
+    ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
     model: null, effort: null, models: [], items: [], approvals: [], error: null,
   };
 
@@ -331,9 +350,11 @@ export class CodexGuiRuntime {
     } catch (error) {
       this.state.error = 'モデル一覧を取得できません: ' + (error instanceof Error ? error.message : String(error));
     }
+    this.state.cwd = this.getWorkspaceCwd();
     if (this.state.threadId) {
       try {
         const result = await this.request('thread/resume', { threadId: this.state.threadId }, 40000);
+        this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || this.state.cwd;
         // thread/resume may return a summary rather than all messages.
         // Recover the transcript explicitly from the durable local/remote thread.
         try {
@@ -349,6 +370,120 @@ export class CodexGuiRuntime {
       }
     }
     this.publish();
+  }
+
+
+  getWorkspaceCwd(): string {
+    return this.workspace.hostId
+      ? this.workspace.remoteDirectory || ''
+      : this.tab.cwd || this.workspace.directories[0] || '';
+  }
+
+  async listThreads(options: {
+    cursor?: string;
+    search?: string;
+    scope?: 'workspace' | 'host';
+  }): Promise<CodexGuiSessionPage> {
+    if (!this.state.ready || this.closed) throw new Error('Codex App Server is unavailable');
+    const cursor = options.cursor || '';
+    if (cursor.length > 3000) throw new Error('Invalid history cursor');
+    const search = (options.search || '').trim();
+    if (search.length > 160) throw new Error('Search text is too long');
+    const workspaceCwd = this.getWorkspaceCwd();
+    const params: Json = {
+      limit: 50,
+      sortKey: 'updated_at',
+      sortDirection: 'desc',
+      ...(cursor ? { cursor } : {}),
+      ...(search ? { searchTerm: search } : {}),
+      ...(options.scope === 'workspace' && workspaceCwd ? { cwd: workspaceCwd } : {}),
+    };
+    const result = await this.request('thread/list', params, 45000);
+    const sessions = (Array.isArray(result.data) ? result.data : []).map((raw): CodexGuiSessionSummary | null => {
+      const thread = asRecord(raw);
+      const id = asString(thread.id);
+      if (!THREAD_ID_RE.test(id) || thread.ephemeral === true || thread.parentThreadId) return null;
+      const source = thread.source;
+      const sourceKind = typeof source === 'string' ? source : asString(asRecord(source).type);
+      const status = thread.status;
+      return {
+        id,
+        preview: asString(thread.preview).slice(0, 600),
+        cwd: asString(thread.cwd),
+        createdAt: typeof thread.createdAt === 'number' ? thread.createdAt : 0,
+        updatedAt: typeof thread.updatedAt === 'number' ? thread.updatedAt : 0,
+        model: asString(thread.model) || null,
+        source: sourceKind || 'cli',
+        status: typeof status === 'string' ? status : asString(asRecord(status).type),
+      };
+    }).filter((thread): thread is CodexGuiSessionSummary => thread !== null);
+    return {
+      sessions,
+      nextCursor: asString(result.nextCursor) || null,
+      currentThreadId: this.state.threadId,
+      workspaceCwd,
+    };
+  }
+
+  async resumeThread(threadId: string): Promise<CodexGuiState> {
+    if (!this.state.ready || this.closed) throw new Error('Codex App Server is unavailable');
+    if (!THREAD_ID_RE.test(threadId)) throw new Error('Invalid Codex session ID');
+    if (this.state.busy || this.state.approvals.length > 0) {
+      throw new Error('実行中または承認待ちのため、会話を切り替えられません');
+    }
+    if (threadId === this.state.threadId) return this.snapshot();
+
+    // The existing tab's previous thread is retained in Codex history.
+    // Only replace its pointer after resume and transcript loading succeed.
+    this.state.busy = true;
+    this.state.error = null;
+    this.publish();
+    try {
+      const result = await this.request('thread/resume', { threadId }, 45000);
+      const summary = asRecord(result.thread);
+      let history = summary;
+      try {
+        const read = await this.request('thread/read', { threadId, includeTurns: true }, 45000);
+        history = asRecord(read.thread);
+      } catch {
+        // Older servers can include the transcript in thread/resume directly.
+      }
+      const previousThreadId = this.state.threadId;
+      const previousItems = this.state.items;
+      const previousModel = this.state.model;
+      const previousEffort = this.state.effort;
+      const previousCwd = this.state.cwd;
+      try {
+        this.state.threadId = threadId;
+        this.state.items = [];
+        this.state.turnId = null;
+        this.state.approvals = [];
+        this.state.cwd = asString(result.cwd) || asString(history.cwd) || this.getWorkspaceCwd();
+        const resumedModel = asString(result.model) || asString(history.model);
+        if (resumedModel && this.state.models.some((model) => model.model === resumedModel)) {
+          this.state.model = resumedModel;
+          this.state.effort = asString(result.reasoningEffort) ||
+            asString(history.reasoningEffort) || null;
+        }
+        this.restore(history);
+        await this.store();
+      } catch (error) {
+        this.state.threadId = previousThreadId;
+        this.state.items = previousItems;
+        this.state.model = previousModel;
+        this.state.effort = previousEffort;
+        this.state.cwd = previousCwd;
+        throw error;
+      }
+      this.state.error = null;
+      return this.snapshot();
+    } catch (error) {
+      this.state.error = error instanceof Error ? error.message : '履歴を再開できませんでした';
+      throw error;
+    } finally {
+      this.state.busy = false;
+      this.publish();
+    }
   }
 
   private restore(thread: Json): void {
@@ -390,10 +525,11 @@ export class CodexGuiRuntime {
   }
 
   async action(
-    action: 'new-thread' | 'send' | 'interrupt' | 'approve' | 'settings',
-    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: string },
+    action: 'new-thread' | 'send' | 'interrupt' | 'approve' | 'settings' | 'resume-thread',
+    args: { text?: string; model?: string; effort?: string; requestId?: string | number; decision?: string; threadId?: string },
   ): Promise<CodexGuiState> {
     if (this.closed || !this.state.ready) throw new Error('Codex App Server is unavailable');
+    if (action === 'resume-thread') return this.resumeThread(args.threadId || '');
     if (action === 'approve') {
       const match = this.state.approvals.find((entry) => String(entry.requestId) === String(args.requestId));
       if (!match || (args.decision !== 'accept' && args.decision !== 'decline')) {
@@ -428,6 +564,7 @@ export class CodexGuiRuntime {
     if (action === 'new-thread') {
       if (this.state.busy) throw new Error('Codex is working. Stop the current turn first.');
       this.state.threadId = null;
+      this.state.cwd = this.getWorkspaceCwd();
       this.state.items = [];
       this.state.error = null;
       await this.store();
@@ -453,6 +590,7 @@ export class CodexGuiRuntime {
           const id = asString(asRecord(result.thread).id);
           if (!id) throw new Error('Codex did not return a thread ID');
           this.state.threadId = id;
+          this.state.cwd = cwd;
           await this.store();
         }
         this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
