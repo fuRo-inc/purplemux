@@ -118,7 +118,7 @@ const PaneTabItem = ({
           <TabStatusIndicator tabId={tab.id} panelType={tab.panelType} />
           {tab.panelType === 'claude-code' ? (
             <ClaudeCodeIcon className="mx-0.5 h-3 w-3 shrink-0" />
-          ) : tab.panelType === 'codex-cli' ? (
+          ) : (tab.panelType === 'codex-cli' || tab.panelType === 'codex-chat') ? (
             <OpenAIIcon className="mx-0.5 h-3 w-3 shrink-0 text-foreground" aria-label="Codex" />
           ) : tab.panelType === 'web-browser' ? (
             <Globe className="mx-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
