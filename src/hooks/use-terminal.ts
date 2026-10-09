@@ -244,10 +244,25 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
 
       terminal.open(containerNode);
 
-      // Prevent the browser context menu from overlapping tmux's mouse menu.
-      const suppressBrowserContextMenu = (event: MouseEvent) => event.preventDefault();
-      containerNode.addEventListener('contextmenu', suppressBrowserContextMenu);
-      cleanupContextMenu = () => containerNode.removeEventListener('contextmenu', suppressBrowserContextMenu);
+      // Block right-click before xterm converts it into a tmux mouse event.
+      // Suppressing only 'contextmenu' is too late: tmux already received MouseDown3.
+      const suppressRightMouse = (event: MouseEvent) => {
+        if (event.button !== 2) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      const suppressBrowserContextMenu = (event: MouseEvent) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      containerNode.addEventListener('mousedown', suppressRightMouse, true);
+      containerNode.addEventListener('mouseup', suppressRightMouse, true);
+      containerNode.addEventListener('contextmenu', suppressBrowserContextMenu, true);
+      cleanupContextMenu = () => {
+        containerNode.removeEventListener('mousedown', suppressRightMouse, true);
+        containerNode.removeEventListener('mouseup', suppressRightMouse, true);
+        containerNode.removeEventListener('contextmenu', suppressBrowserContextMenu, true);
+      };
 
       terminalInstance.current = terminal;
       fitAddonRef.current = fitAddon;
