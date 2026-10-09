@@ -15,6 +15,7 @@ import { getCodexGuiRuntime, getLoadedCodexGuiRuntime, peekCodexGuiRuntime, type
 type TaskStatus = 'queued' | 'starting' | 'running' | 'awaiting_approval' |
   'completed' | 'failed' | 'interrupted' | 'unknown';
 type TaskMode = 'continue' | 'new';
+type TaskSandbox = 'read-only' | 'workspace-write';
 interface TaskRecord {
   taskId: string;
   idempotencyKey: string | null;
@@ -25,6 +26,7 @@ interface TaskRecord {
   hostId: string;
   directory: string;
   mode: TaskMode;
+  sandboxMode: TaskSandbox;
   status: TaskStatus;
   createdAt: string;
   updatedAt: string;
@@ -174,10 +176,22 @@ const execute = async (record: TaskRecord, instruction: string): Promise<void> =
     const runtime = await getCodexGuiRuntime(workspace, tab);
     const before = runtime.snapshot();
     if (before.busy) return fail('Codex is already working in this tab');
-    // Never silently use Full Access, no approvals, or a pre-existing unsafe
-    // thread setting when a request originated from ChatGPT.
-    await runtime.action('settings', { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' });
+    // A persisted thread may have been resumed from another working directory.
+    // Compare its ACTUAL cwd with the confirmed target, not only the UI tab.
+    if (record.mode === 'continue' && before.threadId &&
+        (!before.cwd || normalizeDirectory(before.cwd) !== record.directory)) {
+      return fail('Codex thread working directory differs from the confirmed target. Choose a new thread explicitly.');
+    }
+    // The default is read-only. Workspace writes require a separate explicit
+    // request; Full Access and no-approval policies are never available via MCP.
+    await runtime.action('settings', {
+      sandboxMode: record.sandboxMode, approvalPolicy: 'on-request',
+    });
     if (record.mode === 'new') await runtime.action('new-thread', {});
+    const configured = runtime.snapshot();
+    if (configured.cwd && normalizeDirectory(configured.cwd) !== record.directory) {
+      return fail('Codex working directory changed before task submission');
+    }
     const result = await runtime.action('send', { text: instruction });
     record.threadId = result.threadId;
     record.turnId = result.turnId || result.lastTurnId;
@@ -210,6 +224,15 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
       args.expectedDirectory.length > 2048) return fail('Expected absolute working directory is required');
   if (args.confirmTarget !== true) return fail('Explicit confirmTarget=true is required');
   if (args.mode !== undefined && args.mode !== 'continue' && args.mode !== 'new') return fail('Invalid mode');
+  if (args.sandboxMode !== undefined && args.sandboxMode !== 'read-only' &&
+      args.sandboxMode !== 'workspace-write') return fail('Invalid sandboxMode');
+  const sandboxMode: TaskSandbox = args.sandboxMode === 'workspace-write' ? 'workspace-write' : 'read-only';
+  if (sandboxMode === 'workspace-write' && args.confirmWriteAccess !== true) {
+    return fail('confirmWriteAccess=true is required for workspace-write tasks');
+  }
+  if (args.confirmWriteAccess !== undefined && typeof args.confirmWriteAccess !== 'boolean') {
+    return fail('Invalid confirmWriteAccess');
+  }
   if (typeof args.instruction !== 'string' || !args.instruction.trim() ||
       args.instruction.length > MAX_INSTRUCTION) return fail('Instruction must contain 1–16000 characters');
   const mode: TaskMode = args.mode === 'new' ? 'new' : 'continue';
@@ -230,11 +253,12 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
   try {
     const previous = await load(taskId);
     if (previous.instructionHash !== hash || previous.mode !== mode ||
+        previous.sandboxMode !== sandboxMode ||
         previous.hostId !== hostId || previous.directory !== normalizeDirectory(directory)) {
       return fail('Idempotency key already used for a different task');
     }
     return { taskId: previous.taskId, status: previous.status, existing: true,
-      workspaceId, tabId, hostId, directory: previous.directory };
+      workspaceId, tabId, hostId, directory: previous.directory, sandboxMode };
   } catch (error) {
     if (!(error instanceof Error) || error.message !== 'Task not found') throw error;
   }
@@ -247,7 +271,7 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
   const record: TaskRecord = {
     taskId, idempotencyKey, instructionHash: hash,
     instructionPreview: args.instruction.trim().slice(0, 220),
-    workspaceId, tabId, hostId, directory: normalizeDirectory(directory), mode,
+    workspaceId, tabId, hostId, directory: normalizeDirectory(directory), mode, sandboxMode,
     status: 'queued', ownerInstance: INSTANCE, createdAt: now(), updatedAt: now(),
     threadId: null, turnId: null, userItemId: null, lastTurnStatus: null,
     summary: null, changedFiles: [], diffPreview: null,
@@ -263,7 +287,7 @@ export const submitCodexTask = async (args: Record<string, unknown>) => {
     throw error;
   }
   return { taskId, status: 'queued', existing: false,
-    workspaceId, tabId, hostId, directory: record.directory, mode,
+    workspaceId, tabId, hostId, directory: record.directory, mode, sandboxMode,
     note: 'Task accepted; use get_codex_task to poll for progress and results.' };
 };
 
@@ -272,6 +296,7 @@ const summarize = async (record: TaskRecord, includeOutput: boolean, includeDiff
   const status: Record<string, unknown> = {
     taskId: record.taskId, workspaceId: record.workspaceId, tabId: record.tabId,
     hostId: record.hostId, directory: record.directory, mode: record.mode,
+    sandboxMode: record.sandboxMode || 'workspace-write',
     status: record.status, createdAt: record.createdAt, updatedAt: record.updatedAt,
     threadId: record.threadId, turnId: record.turnId,
     lastTurnStatus: record.lastTurnStatus, error: record.error,
@@ -332,6 +357,7 @@ export const listCodexTasks = async (args: Record<string, unknown>) => {
     return {
       taskId: record.taskId, workspaceId: record.workspaceId, tabId: record.tabId,
       hostId: record.hostId, directory: record.directory,
+      sandboxMode: record.sandboxMode || 'workspace-write',
       status: record.status, createdAt: record.createdAt, threadId: record.threadId,
       instructionPreview: record.instructionPreview,
     };
