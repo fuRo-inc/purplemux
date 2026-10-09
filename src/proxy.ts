@@ -9,6 +9,16 @@ import {
 import { verifyTokenValue } from '@/lib/cli-token';
 
 export const proxy = async (request: NextRequest) => {
+  // The private MCP bridge reaches the same runtime that serves the browser.
+  // No browser cookie or general-purpose CLI token is accepted for this route.
+  if (request.nextUrl.pathname === '/api/mcp-internal') {
+    const expected = process.env.__PMUX_MCP_INTERNAL_TOKEN;
+    const presented = request.headers.get('x-pmux-mcp-internal');
+    return expected && presented === expected
+      ? NextResponse.next()
+      : NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
   const cliToken = request.headers.get('x-pmux-token');
   if (cliToken && verifyTokenValue(cliToken)) {
     return NextResponse.next();
