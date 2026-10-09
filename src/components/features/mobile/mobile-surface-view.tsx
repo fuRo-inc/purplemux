@@ -14,6 +14,7 @@ import TerminalContainer from '@/components/features/workspace/terminal-containe
 import ConnectionStatus from '@/components/features/workspace/connection-status';
 import MobileClaudeCodePanel from '@/components/features/mobile/mobile-claude-code-panel';
 import MobileCodexPanel from '@/components/features/mobile/mobile-codex-panel';
+import CodexAppChatPanel from '@/components/features/workspace/codex-app-chat-panel';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
 import MobileTerminalToolbar from '@/components/features/mobile/mobile-terminal-toolbar';
 import MobileTerminalHistory from '@/components/features/mobile/mobile-terminal-history';
@@ -114,6 +115,7 @@ const MobileSurfaceView = ({
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const isClaudeCode = panelType === 'claude-code';
   const isCodex = panelType === 'codex-cli';
+  const isCodexChat = panelType === 'codex-chat';
   const isAgentSessionList = panelType === 'agent-sessions';
   const isAgentPanel = isClaudeCode || isCodex;
   const usesHiddenTerminal = isAgentPanel || isAgentSessionList;
@@ -829,6 +831,12 @@ const MobileSurfaceView = ({
         ...(keyboardViewportHeight !== null ? { height: keyboardViewportHeight, maxHeight: keyboardViewportHeight, flex: 'none' } : {}),
       }}
     >
+      {isCodexChat && activeTabId && layoutWsId && (
+        <div className="absolute inset-0 z-40">
+          <CodexAppChatPanel key={activeTabId} workspaceId={layoutWsId} tabId={activeTabId} mobile />
+        </div>
+      )}
+      
       {isWebBrowser && activeTabId && (
         <WebBrowserPanel
           key={activeTabId}
