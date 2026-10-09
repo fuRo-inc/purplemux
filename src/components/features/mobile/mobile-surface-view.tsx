@@ -243,7 +243,7 @@ const MobileSurfaceView = ({
     return true;
   }, []);
 
-  const { terminalRef, write, clear, reset, fit, focus, isReady, getBufferText } = useTerminal({
+  const { terminalRef, write, clear, reset, fit, focus, isReady, getBufferText, copyTerminalText } = useTerminal({
     theme: terminalTheme.colors,
     fontSize: isAgentPanel ? undefined : MOBILE_FONT_SIZE,
     lineHeight: resolveLineHeight(configLineHeight, configLineHeightCustom),
@@ -830,7 +830,7 @@ const MobileSurfaceView = ({
       )}
 
       {!isAgentPanel && !isWebBrowser && !isDiff && !isAgentSessionList && status === 'connected' && (
-        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} />
+        <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} />
       )}
 
       {agentModePrompt && agentModePrompt.tabId === activeTabId && panelType === 'terminal' && (
