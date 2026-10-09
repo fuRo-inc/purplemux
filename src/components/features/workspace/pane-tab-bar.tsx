@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTranslations } from 'next-intl';
-import { X, ChevronLeft, ChevronRight, AlertTriangle } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, AlertTriangle, History } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -31,6 +31,7 @@ interface IPaneTabBarProps {
   onMoveTab: (tabId: string, fromPaneId: string, toIndex: number) => void;
   onFocusPane: () => void;
   onRetry: () => void;
+  onOpenHistory?: () => void;
 }
 
 const PaneTabBar = ({
@@ -54,6 +55,7 @@ const PaneTabBar = ({
   onMoveTab,
   onFocusPane,
   onRetry,
+  onOpenHistory,
 }: IPaneTabBarProps) => {
   const t = useTranslations('terminal');
   const tc = useTranslations('common');
@@ -228,6 +230,18 @@ const PaneTabBar = ({
 
       <TooltipProvider>
         <div className="flex shrink-0 items-stretch">
+          {onOpenHistory && activeTabId && (sortedTabs.find((tab) => tab.id === activeTabId)?.panelType ?? 'terminal') === 'terminal' && (
+            <Tooltip>
+              <TooltipTrigger
+                className="flex h-9 w-8 items-center justify-center text-muted-foreground hover:text-foreground"
+                onClick={(event) => { event.stopPropagation(); onOpenHistory(); }}
+                aria-label="ターミナル履歴を表示"
+              >
+                <History className="h-3.5 w-3.5" />
+              </TooltipTrigger>
+              <TooltipContent side="bottom">ターミナル履歴</TooltipContent>
+            </Tooltip>
+          )}
           <PaneNewTabMenu
             paneId={paneId}
             isCreating={isCreating}
