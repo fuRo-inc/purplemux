@@ -25,8 +25,6 @@ import TerminalContainer from '@/components/features/workspace/terminal-containe
 import TerminalHistoryViewer from '@/components/features/workspace/terminal-history-viewer';
 import ClaudeCodePanel from '@/components/features/workspace/claude-code-panel';
 import CodexPanel from '@/components/features/workspace/codex-panel';
-import RemoteCodexPanel from '@/components/features/workspace/remote-codex-panel';
-import useWorkspaceStore from '@/hooks/use-workspace-store';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
 import WebInputBar from '@/components/features/workspace/web-input-bar';
 import QuickPromptBar from '@/components/features/workspace/quick-prompt-bar';
@@ -207,8 +205,6 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
   );
 
   const layoutWsId = useLayoutStore((state) => state.workspaceId);
-  const isRemoteWorkspace = useWorkspaceStore((s) => s.workspaces.some((w) => w.id === layoutWsId && !!w.hostId));
-  const isRemoteCodex = isCodex && isRemoteWorkspace;
 
   // Live terminal output is rendered through nested tmux. Its earlier lines
   // belong to tmux, not necessarily to xterm's browser-side scrollback.
@@ -388,7 +384,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
     onTerminalData: onCodexUpdateData,
     onRespond: onCodexUpdateResponse,
   } = useCodexUpdatePromptDetector({
-    enabled: isCodex && !isRemoteWorkspace && claudeCliState === 'inactive',
+    enabled: isCodex && claudeCliState === 'inactive',
     scopeKey: activeTabId,
     getBufferText: () => termActionsRef.current.getBufferText(),
     sendStdin: (data) => wsActionsRef.current.sendStdin(data),
@@ -935,11 +931,6 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
 
   const handleNewCodexSession = useCallback(async () => {
     if (status !== 'connected' || !activeTabId) return;
-    if (isRemoteWorkspace) {
-      // Remote Codex is installed on the SSH host, not on the NUC.
-      sendStdin('codex\r');
-      return;
-    }
     if (!await ensureAgentInstalled('codex')) return;
     let command: string;
     try {
@@ -951,7 +942,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
     markAgentLaunch(activeTabId, { resetAgentSession: true });
     useTabStore.getState().setSessionView(activeTabId, 'check');
     sendStdin(`${command}\r`);
-  }, [status, sendStdin, activeTabId, buildCodexCommand, ensureAgentInstalled, markAgentLaunch, t, isRemoteWorkspace]);
+  }, [status, sendStdin, activeTabId, buildCodexCommand, ensureAgentInstalled, markAgentLaunch, t]);
 
   const handleNewClaudeFromSessionList = useCallback(async () => {
     if (!await ensureAgentInstalled('claude')) return;
@@ -1033,11 +1024,6 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
       if (detail?.paneId !== paneId || detail.tabId !== activeTabId) return;
       if (detail.provider !== 'claude' && detail.provider !== 'codex') return;
       const provider = detail.provider;
-      if (isRemoteWorkspace && provider === 'codex') {
-        // Switching Chat / Terminal must never restart a running remote CLI.
-        handleSwitchPanelType('codex-cli');
-        return;
-      }
       void (async () => {
         if (!await ensureAgentInstalled(provider)) return;
         const panelType = provider === 'codex' ? 'codex-cli' : 'claude-code';
@@ -1058,7 +1044,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
 
     window.addEventListener('purplemux-start-agent', handleStartAgentRequest);
     return () => window.removeEventListener('purplemux-start-agent', handleStartAgentRequest);
-  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, handleSwitchPanelType, paneId, isRemoteWorkspace]);
+  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, handleSwitchPanelType, paneId]);
 
   const handleSwitchToAgentMode = useCallback(async () => {
     const prompt = agentModePrompt;
@@ -1320,16 +1306,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
                   onTrustResponse={onTrustResponse}
                 />
               )}
-              {isRemoteCodex && activeTab && !showInitialLoading && layoutWsId && (
-                <RemoteCodexPanel
-                  key={activeTab.sessionName}
-                  workspaceId={layoutWsId}
-                  sessionName={activeTab.sessionName}
-                  sendStdin={sendWebStdin}
-                  terminalConnected={status === 'connected'}
-                />
-              )}
-              {isCodex && !isRemoteWorkspace && activeTab && !showInitialLoading && activeTabId && (
+              {isCodex && activeTab && !showInitialLoading && activeTabId && (
                 <CodexPanel
                   key={activeTab.sessionName}
                   tabId={activeTabId}
@@ -1347,7 +1324,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
                   removePendingMessageRef={removePendingMessageRef}
                 />
               )}
-              {isAgentPanel && !isRemoteCodex && !showInitialLoading && agentInputVisible && (
+              {isAgentPanel && !showInitialLoading && agentInputVisible && (
                 <WebInputBar
                   key={activeTabId}
                   tabId={activeTabId ?? undefined}
@@ -1370,7 +1347,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
                   attachFilesRef={attachFilesRef}
                 />
               )}
-              {isAgentPanel && !isRemoteCodex && !showInitialLoading && agentInputVisible && activeTabId && (
+              {isAgentPanel && !showInitialLoading && agentInputVisible && activeTabId && (
                 <QuickPromptBar
                   prompts={quickPrompts}
                   visible
