@@ -59,7 +59,7 @@ PURPLEMUX_MCP_ENABLED=1 PURPLEMUX_MCP_ALLOW_WRITES=1 pnpm dev
 
 ## 3. ChatGPT経由のテスト（最初は読み取りだけ依頼）
 
-1. 「PurplemuxのWorkspaceとCodex Chatを列挙して」と依頼し、実行先のHost ID、Workspace ID、タブID、実際のcwdを確認。
+1. 「PurplemuxのWorkspaceとCodex Chatを列挙して」と依頼し、実行先のHost ID、Workspace ID、タブID、実際のcwdを確認。タブの `directory` と既存threadの `threadDirectory` が異なる場合、`mode: continue` は拒否されるため、ユーザーの許可を得て `mode: new` を選択する。
 2. 変更しても問題ない開発／シミュレーションのWorkspaceで「このタブの現在の状態を確認」と依頼。
 3. 操作ツール有効化後、最初は「作業ディレクトリとGit状態を調べ、ファイルの変更はしない」という**読み取りのみの指示**をCodexへ出す。`sandboxMode: read-only`（初期値）を使用する。MCP自身には変更可能な操作があるため、送信先と権限を画面で確認する。
 4. `start_codex_task` が返した `taskId` を使い、`get_codex_task` で進行状況を確認する。結果本文は `includeOutput:true`、差分は `includeDiff:true` で明示的に要求する。
