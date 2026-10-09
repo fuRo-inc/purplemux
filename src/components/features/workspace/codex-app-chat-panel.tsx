@@ -39,11 +39,15 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
         const received = JSON.parse(event.data) as CodexGuiState;
         setState(received);
         setConnected(true);
+        setActionError('');
       } catch {
         setActionError('Codexの通知を処理できませんでした');
       }
     };
-    events.onerror = () => setConnected(false);
+    events.onerror = () => {
+      setConnected(false);
+      setActionError('Codex App Serverに接続できません。ホストのCodex認証とPurplemuxの起動ログを確認してください。');
+    };
     return () => events.close();
   }, [workspaceId, tabId]);
 
