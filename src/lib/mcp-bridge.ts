@@ -15,9 +15,8 @@ import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {
-  listBridgeHosts, listBridgeWorkspaces, listBridgeCodexTabs, getBridgeCodexStatus,
-} from '@/lib/mcp-bridge-data';
+import { listBridgeHosts, listBridgeWorkspaces } from '@/lib/mcp-bridge-data';
+import { callMcpRuntime } from '@/lib/mcp-internal-client';
 
 const PORT_DEFAULT = 18223;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -81,6 +80,101 @@ const tools = [
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }));
 
+const taskReadTools = [
+  {
+    name: 'get_codex_task',
+    title: 'Read a Codex task and results',
+    description: 'Read task status by ID, and optionally bounded final output, recent items, pending approvals, or diff. Does not start Codex or modify files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string' },
+        includeOutput: { type: 'boolean', default: false },
+        includeDiff: { type: 'boolean', default: false },
+      },
+      required: ['taskId'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_codex_tasks',
+    title: 'List Codex tasks started through ChatGPT',
+    description: 'Read recent queued, running and finished MCP task records. No Codex processes are started.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceId: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
+      },
+      additionalProperties: false,
+    },
+  },
+].map((tool) => ({
+  ...tool,
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}));
+
+// Deliberately hidden until the NUC operator opts in via an environment
+// variable and restarts Purplemux. ChatGPT tool approvals are also required.
+const taskWriteTools = [
+  {
+    name: 'start_codex_task',
+    title: 'Start a Codex task in a verified workspace',
+    description: 'Submit work to the specified existing Codex Chat tab. Can modify files inside the workspace. Always verify host and directory against list_codex_tabs. Requires confirmTarget=true. Returns taskId immediately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceId: { type: 'string' },
+        tabId: { type: 'string' },
+        expectedHostId: { type: 'string' },
+        expectedDirectory: { type: 'string' },
+        instruction: { type: 'string', minLength: 1, maxLength: 16000 },
+        mode: { type: 'string', enum: ['continue', 'new'], default: 'continue' },
+        idempotencyKey: { type: 'string', description: 'Optional unique client key to avoid duplicate task submission on retry.' },
+        confirmTarget: { type: 'boolean', description: 'Must be true after verifying the target.' },
+      },
+      required: ['workspaceId', 'tabId', 'expectedHostId', 'expectedDirectory', 'instruction', 'confirmTarget'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'interrupt_codex_task',
+    title: 'Interrupt an active Codex task',
+    description: 'Interrupt only the exact active turn associated with this taskId. Requires explicit confirmation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string' },
+        confirmInterrupt: { type: 'boolean' },
+      },
+      required: ['taskId', 'confirmInterrupt'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'respond_codex_approval',
+    title: 'Respond to a specific Codex approval request',
+    description: 'Accept or decline a pending command/file-change approval. First inspect get_codex_task(includeOutput=true) and match the exact requestId and expectedCommand. Accepting can run commands or modify files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string' },
+        requestId: { anyOf: [{ type: 'string' }, { type: 'integer' }] },
+        expectedCommand: { type: 'string' },
+        decision: { type: 'string', enum: ['accept', 'decline'] },
+        confirmApproval: { type: 'boolean' },
+      },
+      required: ['taskId', 'requestId', 'expectedCommand', 'decision', 'confirmApproval'],
+      additionalProperties: false,
+    },
+  },
+].map((tool) => ({
+  ...tool,
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+}));
+const writesEnabled = (): boolean => process.env.PURPLEMUX_MCP_ALLOW_WRITES === '1';
+const allTools = () => [
+  ...tools, ...taskReadTools, ...(writesEnabled() ? taskWriteTools : []),
+];
+
 const serializeJson = (value: unknown): string => JSON.stringify(value);
 const rpcResult = (id: RpcId, result: unknown): RpcReply => ({ jsonrpc: '2.0', id, result });
 const rpcError = (id: RpcId, code: number, message: string, data?: unknown): RpcReply => ({
@@ -88,7 +182,9 @@ const rpcError = (id: RpcId, code: number, message: string, data?: unknown): Rpc
 });
 
 const serverInfo = { name: 'purplemux-readonly', version: '0.1.0' };
-const instructions = 'Read-only development status bridge. It cannot run commands, start Codex, send tasks or alter files. Host connection and Codex states may be unknown unless already loaded in Purplemux.';
+const instructions = () => writesEnabled()
+  ? 'Purplemux development bridge. Read status before targeting a Codex tab, confirm exact host and working directory, then submit a task. File changes and approvals require explicit user review. Always poll taskId for completion.'
+  : 'Read-only development status bridge. Task submission, interruption and approvals are disabled until the NUC operator explicitly opts in. Host SSH connectivity may not have been checked.';
 
 export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string): Promise<RpcReply | null> => {
   const req = asObject(body);
@@ -124,19 +220,19 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
           supportedVersions: [PROTOCOL_MODERN],
           capabilities: { tools: {} },
           _meta: { 'io.modelcontextprotocol/serverInfo': serverInfo },
-          instructions,
+          instructions: instructions(),
         });
       case 'initialize':
         return respond({
           protocolVersion: PROTOCOL_LEGACY,
           capabilities: { tools: { listChanged: false } },
           serverInfo,
-          instructions,
+          instructions: instructions(),
         });
       case 'ping':
         return respond({});
       case 'tools/list':
-        return respond({ tools });
+        return respond({ tools: allTools() });
       case 'tools/call': {
         if (typeof params.name !== 'string') return rpcError(id, -32602, 'Tool name required');
         const args = asObject(params.arguments);
@@ -149,10 +245,26 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
             data = await listBridgeWorkspaces(args.hostId);
             break;
           case 'list_codex_tabs':
-            data = await listBridgeCodexTabs(args.workspaceId);
+            data = await callMcpRuntime('list_codex_tabs', { workspaceId: args.workspaceId });
             break;
           case 'get_codex_status':
-            data = await getBridgeCodexStatus(args.workspaceId, args.tabId, args.includeRecentItems ?? false);
+            data = await callMcpRuntime('get_codex_status', {
+              workspaceId: args.workspaceId,
+              tabId: args.tabId,
+              includeRecentItems: args.includeRecentItems ?? false,
+            });
+            break;
+          case 'get_codex_task':
+            data = await callMcpRuntime('get_codex_task', args);
+            break;
+          case 'list_codex_tasks':
+            data = await callMcpRuntime('list_codex_tasks', args);
+            break;
+          case 'start_codex_task':
+          case 'interrupt_codex_task':
+          case 'respond_codex_approval':
+            if (!writesEnabled()) return rpcError(id, -32602, 'Write tools are disabled on this host');
+            data = await callMcpRuntime(params.name, args);
             break;
           default:
             return rpcError(id, -32602, 'Unknown read-only tool');
