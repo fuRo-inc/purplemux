@@ -109,6 +109,18 @@ describe('Purplemux read-only MCP bridge', () => {
     expect(result.tools.slice(-3).every((tool) => !tool.annotations.readOnlyHint)).toBe(true);
   });
 
+  it('describes workspace-write opt-in and defaults to read-only for task submission', async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1');
+    const response = await dispatchMcpRequest({ jsonrpc: '2.0', id: 40, method: 'tools/list' });
+    const tool = (response?.result as { tools: { name: string; inputSchema: {
+      properties: Record<string, { default?: string | boolean; enum?: string[] }>;
+    } }[] }).tools.find((entry) => entry.name === 'start_codex_task');
+    expect(tool?.inputSchema.properties.sandboxMode).toMatchObject({
+      default: 'read-only', enum: ['read-only', 'workspace-write'],
+    });
+    expect(tool?.inputSchema.properties.confirmWriteAccess).toMatchObject({ default: false });
+  });
+
   it('rejects mutation attempts even when an unlisted tool is invoked', async () => {
     vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '0');
     const result = await dispatchMcpRequest({
