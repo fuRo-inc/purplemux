@@ -14,8 +14,6 @@ import TerminalContainer from '@/components/features/workspace/terminal-containe
 import ConnectionStatus from '@/components/features/workspace/connection-status';
 import MobileClaudeCodePanel from '@/components/features/mobile/mobile-claude-code-panel';
 import MobileCodexPanel from '@/components/features/mobile/mobile-codex-panel';
-import RemoteCodexPanel from '@/components/features/workspace/remote-codex-panel';
-import useWorkspaceStore from '@/hooks/use-workspace-store';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
 import MobileTerminalToolbar from '@/components/features/mobile/mobile-terminal-toolbar';
 import MobileTerminalHistory from '@/components/features/mobile/mobile-terminal-history';
@@ -127,8 +125,6 @@ const MobileSurfaceView = ({
     (state) => (activeTabId ? state.metadata[activeTabId]?.cwd : undefined),
   );
   const layoutWsId = useLayoutStore((state) => state.workspaceId);
-  const isRemoteWorkspace = useWorkspaceStore((s) => s.workspaces.some((w) => w.id === layoutWsId && !!w.hostId));
-  const isRemoteCodex = isCodex && isRemoteWorkspace;
   const diffSettings = useLayoutStore((state) => state.layout?.diffSettings);
 
   const { theme: terminalTheme } = useTerminalTheme();
@@ -219,7 +215,7 @@ const MobileSurfaceView = ({
     onTerminalData: onCodexUpdateData,
     onRespond: onCodexUpdateResponse,
   } = useCodexUpdatePromptDetector({
-    enabled: isCodex && !isRemoteWorkspace && claudeCliState === 'inactive',
+    enabled: isCodex && claudeCliState === 'inactive',
     scopeKey: activeTabId,
     getBufferText: () => termActionsRef.current.getBufferText(),
     sendStdin: (data) => wsActionsRef.current.sendStdin(data),
@@ -549,10 +545,6 @@ const MobileSurfaceView = ({
 
   const handleNewCodexSession = useCallback(async () => {
     if (status !== 'connected' || !activeTabId) return;
-    if (isRemoteWorkspace) {
-      sendStdin('codex\r');
-      return;
-    }
     if (!await ensureAgentInstalled('codex')) return;
     let command: string;
     try {
@@ -564,7 +556,7 @@ const MobileSurfaceView = ({
     markAgentLaunch(activeTabId, { resetAgentSession: true });
     useTabStore.getState().setSessionView(activeTabId, 'check');
     sendStdin(`${command}\r`);
-  }, [status, sendStdin, activeTabId, buildCodexCommand, ensureAgentInstalled, markAgentLaunch, tt, isRemoteWorkspace]);
+  }, [status, sendStdin, activeTabId, buildCodexCommand, ensureAgentInstalled, markAgentLaunch, tt]);
 
   const handleNewClaudeFromSessionList = useCallback(async () => {
     if (!activeTabId) return;
@@ -647,10 +639,6 @@ const MobileSurfaceView = ({
       if (detail?.tabId !== activeTabId) return;
       if (detail.provider !== 'claude' && detail.provider !== 'codex') return;
       const provider = detail.provider;
-      if (isRemoteWorkspace && provider === 'codex') {
-        onUpdateTabPanelType(paneId, activeTabId, 'codex-cli');
-        return;
-      }
       void (async () => {
         if (!await ensureAgentInstalled(provider)) return;
         onUpdateTabPanelType(paneId, activeTabId, provider === 'codex' ? 'codex-cli' : 'claude-code');
@@ -664,7 +652,7 @@ const MobileSurfaceView = ({
 
     window.addEventListener('purplemux-start-agent', handleStartAgentRequest);
     return () => window.removeEventListener('purplemux-start-agent', handleStartAgentRequest);
-  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, onUpdateTabPanelType, paneId, isRemoteWorkspace]);
+  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, onUpdateTabPanelType, paneId]);
 
   useEffect(() => {
     if (!pendingRestartRef.current || agentProcess === true) return;
@@ -892,18 +880,7 @@ const MobileSurfaceView = ({
         />
       )}
 
-      {isRemoteCodex && activeTab && layoutWsId && (
-        <RemoteCodexPanel
-          key={activeTab.sessionName}
-          workspaceId={layoutWsId}
-          sessionName={activeTab.sessionName}
-          sendStdin={sendWebStdin}
-          terminalConnected={status === 'connected'}
-          mobile
-        />
-      )}
-
-      {isCodex && !isRemoteWorkspace && activeTab && (
+      {isCodex && activeTab && (
         <MobileCodexPanel
           tabId={activeTabId ?? undefined}
           wsId={layoutWsId ?? undefined}
