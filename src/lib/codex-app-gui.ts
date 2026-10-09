@@ -354,10 +354,18 @@ export class CodexGuiRuntime {
         '-p', String(host.port), host.username + '@' + host.address,
         'bash -lic ' + shellQuote('exec codex app-server')];
     }
+    // Never forward Purplemux's internal MCP or browser-auth credentials to
+    // Codex (or SSH). Codex can execute workspace commands, and those child
+    // processes inherit the App Server environment.
+    const childEnv = { ...process.env, NO_COLOR: '1' };
+    for (const key of [
+      '__PMUX_MCP_INTERNAL_TOKEN', '__PMUX_MCP_INTERNAL_PORT',
+      'NEXTAUTH_SECRET', 'AUTH_PASSWORD', 'CONTROL_PLANE_API_KEY', 'OPENAI_ADMIN_KEY',
+    ]) delete childEnv[key];
     const child = spawn(command, args, {
       cwd: this.workspace.hostId ? process.cwd() : cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NO_COLOR: '1' },
+      env: childEnv,
     });
     this.child = child;
     let stderr = '';
