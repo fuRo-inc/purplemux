@@ -142,6 +142,7 @@ export default function CodexSessionPicker({
   const visibleRows = useMemo(() => visibleGroups.flatMap((group) => group.rows), [visibleGroups]);
   const activeId = selectedId && visibleRows.some((row) => row.id === selectedId)
     ? selectedId : visibleRows[0]?.id ?? null;
+  const selectedSession = visibleRows.find((session) => session.id === activeId) ?? null;
 
   const selectSession = async (session: CodexGuiSessionSummary) => {
     if (busy || selectingId || loading) return;
@@ -185,7 +186,7 @@ export default function CodexSessionPicker({
 
   return (
     <Dialog open={open} onOpenChange={(value) => { if (!selectingId) onOpenChange(value); }}>
-      <DialogContent className="flex h-[min(85dvh,790px)] w-[calc(100vw-1.5rem)] max-w-5xl flex-col gap-3 overflow-hidden p-4 sm:p-5">
+      <DialogContent className="flex h-[min(88dvh,860px)] w-[calc(100vw-1.5rem)] max-w-5xl flex-col gap-3 overflow-hidden p-4 sm:max-w-5xl sm:p-5 2xl:max-w-6xl">
         <DialogHeader>
           <DialogTitle>Codex セッション</DialogTitle>
           <DialogDescription>
@@ -265,14 +266,22 @@ export default function CodexSessionPicker({
                       disabled={!!selectingId || busy}
                       onMouseEnter={() => setSelectedId(session.id)}
                       onFocus={() => setSelectedId(session.id)}
-                      onClick={() => void selectSession(session)}
+                      onClick={() => setSelectedId(session.id)}
+                      onDoubleClick={() => void selectSession(session)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          void selectSession(session);
+                        }
+                      }}
                       className={`grid w-full grid-cols-[minmax(0,1fr)_74px] items-center gap-3 rounded-sm px-3 py-1.5 text-left text-xs transition-colors sm:grid-cols-[minmax(0,1fr)_108px_84px] ${isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/60'} disabled:opacity-50`}
                     >
                       <span className="flex min-w-0 items-center gap-2">
                         {selectingId === session.id
                           ? <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
                           : <Circle className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />}
-                        <span className="min-w-0 truncate">
+                        <span className="min-w-0 break-words line-clamp-2">
                           {session.preview.trim() || 'Untitled task'}
                         </span>
                         {session.id === currentThreadId &&
@@ -316,6 +325,31 @@ export default function CodexSessionPicker({
             </div>
           )}
         </div>
+
+        {selectedSession && (
+          <div className="shrink-0 space-y-2 rounded-md border bg-muted/30 p-3 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium">選択した会話の内容</span>
+              <span className="shrink-0 text-muted-foreground" title={selectedSession.updatedAt ? new Date(selectedSession.updatedAt * 1000).toLocaleString('ja-JP') : ''}>
+                {timeSince(selectedSession.updatedAt || selectedSession.createdAt)}
+              </span>
+            </div>
+            <div className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed" tabIndex={0}>
+              {selectedSession.preview.trim() || 'タイトルのない会話'}
+            </div>
+            <div className="break-all font-mono text-[11px] text-muted-foreground">{selectedSession.cwd || '(作業ディレクトリ不明)'}</div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <span className="mr-auto text-[11px] text-muted-foreground">クリックで内容確認・ダブルクリックまたはEnterで再開</span>
+              <Button
+                size="sm"
+                disabled={busy || !!selectingId || loading}
+                onClick={() => void selectSession(selectedSession)}
+              >
+                {selectingId === selectedSession.id ? '再開中…' : selectedSession.id === currentThreadId ? '現在の会話へ戻る' : 'この会話を再開'}
+              </Button>
+            </div>
+          </div>
+        )}
 
         {confirmSession && (
           <div className="shrink-0 space-y-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
