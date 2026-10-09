@@ -512,6 +512,7 @@ export class CodexGuiRuntime {
       const previousItems = this.state.items;
       const previousModel = this.state.model;
       const previousEffort = this.state.effort;
+      const previousFastMode = this.state.fastMode;
       const previousCwd = this.state.cwd;
       try {
         this.state.threadId = threadId;
@@ -525,6 +526,11 @@ export class CodexGuiRuntime {
           this.state.effort = asString(result.reasoningEffort) ||
             asString(history.reasoningEffort) || null;
         }
+        const model = this.state.models.find((entry) =>
+          entry.model === (this.state.model || this.state.models.find((m) => m.isDefault)?.model));
+        if (this.state.fastMode && !model?.serviceTiers.some((tier) => tier.id === 'fast')) {
+          this.state.fastMode = false;
+        }
         this.restore(history);
         await this.store();
       } catch (error) {
@@ -532,6 +538,7 @@ export class CodexGuiRuntime {
         this.state.items = previousItems;
         this.state.model = previousModel;
         this.state.effort = previousEffort;
+        this.state.fastMode = previousFastMode;
         this.state.cwd = previousCwd;
         throw error;
       }
