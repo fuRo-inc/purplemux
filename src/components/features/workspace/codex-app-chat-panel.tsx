@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, CircleStop, FileDiff, LoaderCircle, MessageSquare, Plus, SendHorizontal, Terminal, X } from 'lucide-react';
+import { Check, CircleStop, FileDiff, History, LoaderCircle, MessageSquare, Plus, SendHorizontal, Terminal, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import AssistantMessageItem from '@/components/features/timeline/assistant-message-item';
 import UserMessageItem from '@/components/features/timeline/user-message-item';
 import type { CodexGuiState, CodexGuiItem } from '@/lib/codex-app-gui';
+import CodexSessionPicker from '@/components/features/workspace/codex-session-picker';
 
 interface ICodexAppChatPanelProps {
   workspaceId: string;
@@ -12,7 +13,7 @@ interface ICodexAppChatPanelProps {
 }
 
 const DEFAULT_STATE: CodexGuiState = {
-  ready: false, running: false, busy: false, threadId: null, turnId: null,
+  ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
   model: null, effort: null, models: [], items: [], approvals: [], error: null,
 };
 
@@ -20,6 +21,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
   const [state, setState] = useState<CodexGuiState>(DEFAULT_STATE);
   const [connected, setConnected] = useState(false);
   const [draft, setDraft] = useState('');
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [selectedModel, setSelectedModel] = useState('');
   const [selectedEffort, setSelectedEffort] = useState('');
@@ -73,7 +75,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
   }, [state.items, state.busy, state.approvals]);
 
   const request = useCallback(async (
-    action: 'send' | 'new-thread' | 'interrupt' | 'settings' | 'approve',
+    action: 'send' | 'new-thread' | 'interrupt' | 'settings' | 'approve' | 'resume-thread',
     options: Record<string, unknown> = {},
   ) => {
     setActionError('');
@@ -179,6 +181,10 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
           {state.busy ? <LoaderCircle className="h-3 w-3 animate-spin" /> : connected ? <Check className="h-3 w-3" /> : <X className="h-3 w-3" />}
           {state.busy ? '実行中' : connected ? '接続済み' : '接続待機中'}
         </span>
+        {state.cwd && <span className="hidden min-w-0 max-w-[32%] truncate font-mono text-[10px] text-muted-foreground lg:block" title={state.cwd}>{state.cwd}</span>}
+        <Button size="xs" variant="outline" disabled={!connected || !state.ready} onClick={() => setSessionsOpen(true)} title="以前のCodexセッションを検索">
+          <History className="h-3 w-3" /> {!mobile && '以前の会話'}
+        </Button>
         <Button size="xs" variant="outline" disabled={!connected || state.busy} onClick={() => void run('new-thread')}>
           <Plus className="h-3 w-3" /> {!mobile && '新しい会話'}
         </Button>
@@ -274,6 +280,30 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
           )}
         </div>
       </div>
+      <CodexSessionPicker
+        open={sessionsOpen}
+        onOpenChange={setSessionsOpen}
+        workspaceId={workspaceId}
+        tabId={tabId}
+        currentThreadId={state.threadId}
+        busy={state.busy}
+        onResume={async (session) => {
+          const resumed = await request('resume-thread', { threadId: session.id });
+          const fallback = resumed.models.find((model) => model.isDefault) || resumed.models[0];
+          const resumedModel = resumed.models.find((model) => model.model === resumed.model) || fallback;
+          if (resumedModel) {
+            setSelectedModel(resumedModel.model);
+            const supported = resumedModel.supportedReasoningEfforts;
+            setSelectedEffort(
+              supported.some((effort) => effort.reasoningEffort === resumed.effort)
+                ? resumed.effort || resumedModel.defaultReasoningEffort
+                : resumedModel.defaultReasoningEffort,
+            );
+          }
+          setDraft('');
+          isNearBottomRef.current = true;
+        }}
+      />
     </div>
   );
 }
