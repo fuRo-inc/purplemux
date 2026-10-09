@@ -6,6 +6,7 @@ const quote = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
 export const buildRemoteShellCommand = async (
   workspace: IWorkspace,
   initialCommand?: 'codex',
+  sessionName?: string,
 ): Promise<string> => {
   if (!workspace.hostId || !workspace.remoteDirectory) throw new Error('Remote workspace is missing host or directory');
   const host = await getRemoteHost(workspace.hostId);
@@ -18,6 +19,8 @@ export const buildRemoteShellCommand = async (
   if (!workspace.remoteDirectory.startsWith('/') || workspace.remoteDirectory.includes('\\n')) {
     throw new Error('Remote directory must be an absolute path');
   }
-  const remote = `cd -- ${quote(workspace.remoteDirectory)} && ${initialCommand ? "exec bash -lic 'codex; exec bash -l'" : 'exec bash -l'}`;
+  if (!sessionName || !/^pt-[a-zA-Z0-9-]+$/.test(sessionName)) throw new Error('Invalid remote tmux session name');
+  const launch = initialCommand ? `bash -lic ${quote('codex; exec bash -l')}` : undefined;
+  const remote = `tmux -L purplemux_remote new-session -A -s ${quote(sessionName)} -c ${quote(workspace.remoteDirectory)}${launch ? ` ${quote(launch)}` : ''}`;
   return `exec ssh -tt -o BatchMode=yes -o ConnectTimeout=5 -p ${host.port} ${quote(host.username + '@' + host.address)} ${quote(remote)}`;
 };
