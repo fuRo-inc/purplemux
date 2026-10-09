@@ -19,7 +19,8 @@ import { listBridgeHosts, listBridgeWorkspaces } from '@/lib/mcp-bridge-data';
 import { callMcpRuntime } from '@/lib/mcp-internal-client';
 
 const PORT_DEFAULT = 18223;
-const MAX_BODY_BYTES = 64 * 1024;
+// 16k-character Japanese prompts can exceed 64KiB after UTF-8 encoding.
+const MAX_BODY_BYTES = 128 * 1024;
 const PROTOCOL_LEGACY = '2025-11-25';
 const PROTOCOL_MODERN = '2026-07-28';
 const SUPPORTED_VERSIONS = [PROTOCOL_MODERN, PROTOCOL_LEGACY];
