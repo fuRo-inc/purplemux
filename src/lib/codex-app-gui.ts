@@ -54,6 +54,8 @@ export type CodexGuiState = {
   threadId: string | null;
   cwd: string | null;
   turnId: string | null;
+  lastTurnId: string | null;
+  lastTurnStatus: string | null;
   model: string | null;
   effort: string | null;
   sandboxMode: CodexGuiSandbox;
@@ -87,8 +89,10 @@ export class CodexGuiRuntime {
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private seq = 0;
   private closed = false;
+  private lastTurnDiff: { turnId: string; diff: string } | null = null;
   private state: CodexGuiState = {
     ready: false, running: false, busy: false, threadId: null, cwd: null, turnId: null,
+    lastTurnId: null, lastTurnStatus: null,
     model: null, effort: null, sandboxMode: 'workspace-write', approvalPolicy: 'on-request',
     fastMode: false, models: [], items: [], approvals: [], error: null,
   };
@@ -105,6 +109,10 @@ export class CodexGuiRuntime {
       items: this.state.items.map((item) => ({ ...item })),
       approvals: [...this.state.approvals],
     };
+  }
+
+  getTurnDiff(turnId: string): string | null {
+    return this.lastTurnDiff?.turnId === turnId ? this.lastTurnDiff.diff : null;
   }
 
   subscribe(send: (state: CodexGuiState) => void): () => void {
@@ -206,14 +214,21 @@ export class CodexGuiRuntime {
       const turn = asRecord(params.turn);
       this.state.turnId = asString(turn.id) || null;
       this.state.busy = true;
+      this.lastTurnDiff = null;
     } else if (method === 'turn/completed') {
       const turn = asRecord(params.turn);
+      this.state.lastTurnId = asString(turn.id) || this.state.turnId;
+      this.state.lastTurnStatus = asString(turn.status) || 'unknown';
       this.state.busy = false;
       this.state.turnId = null;
       if (asString(turn.status) === 'failed') {
         this.state.error = asString(asRecord(turn.error).message) || 'Codex turn failed';
       }
       this.state.approvals = [];
+    } else if (method === 'turn/diff/updated') {
+      const diff = asString(params.diff);
+      const turnId = asString(params.turnId) || this.state.turnId;
+      if (turnId) this.lastTurnDiff = { turnId, diff: diff.slice(0, 128000) };
     } else if (method === 'item/started' && itemId) {
       if (type === 'commandExecution') {
         this.upsert(itemId, 'command', {
@@ -519,6 +534,9 @@ export class CodexGuiRuntime {
         this.state.threadId = threadId;
         this.state.items = [];
         this.state.turnId = null;
+        this.state.lastTurnId = null;
+        this.state.lastTurnStatus = null;
+        this.lastTurnDiff = null;
         this.state.approvals = [];
         this.state.cwd = asString(result.cwd) || asString(history.cwd) || this.getWorkspaceCwd();
         const resumedModel = asString(result.model) || asString(history.model);
@@ -669,6 +687,9 @@ export class CodexGuiRuntime {
       if (this.state.busy) throw new Error('Codex is working. Stop the current turn first.');
       this.state.threadId = null;
       this.state.cwd = this.getWorkspaceCwd();
+      this.state.lastTurnId = null;
+      this.state.lastTurnStatus = null;
+      this.lastTurnDiff = null;
       this.state.fastMode = false;
       this.state.items = [];
       this.state.error = null;
@@ -710,7 +731,9 @@ export class CodexGuiRuntime {
           ...(this.state.effort ? { effort: this.state.effort } : {}),
           serviceTierForTurn: this.state.fastMode ? requestedFastTier : 'default',
         }, 45000);
-        this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;
+        // A very short turn can complete before turn/start responds.
+        // Do not resurrect its active turn ID after turn/completed.
+        if (this.state.busy) this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;
       } catch (error) {
         this.state.busy = false;
         this.state.error = error instanceof Error ? error.message : String(error);
