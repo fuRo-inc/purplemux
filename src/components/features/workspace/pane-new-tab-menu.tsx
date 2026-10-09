@@ -16,6 +16,7 @@ import { buildClaudeLaunchCommand } from '@/lib/providers/claude/client';
 import { fetchCodexLaunchCommand } from '@/lib/providers/codex/client';
 import { notifyCodexLaunchFailed } from '@/lib/codex-notifications';
 import useConfigStore from '@/hooks/use-config-store';
+import useWorkspaceStore from '@/hooks/use-workspace-store';
 import { useAgentInstallCheck } from '@/hooks/use-agent-install-check';
 
 interface IPaneNewTabMenuProps {
@@ -105,6 +106,11 @@ const PaneNewTabMenu = ({ paneId, isCreating, activePanelType, onCreateTab }: IP
   }, [open, activeIndex]);
 
   const launchCodexNewConversation = useCallback(async () => {
+    const workspace = useWorkspaceStore.getState().workspaces.find((w) => w.id === wsId);
+    if (workspace?.hostId) {
+      onCreateTab('terminal', { command: 'remote-codex' });
+      return;
+    }
     if (!await ensureAgentInstalled('codex')) return;
     try {
       const cmd = await fetchCodexLaunchCommand(wsId);
