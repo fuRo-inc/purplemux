@@ -465,6 +465,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
       const screenEl = containerNode.querySelector('.xterm-screen');
       if (isTouchDevice && screenEl) {
         let lastY = 0;
+        let accumulatedScrollLines = 0;
         let touchStartX = 0;
         let touchStartY = 0;
         let selectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -508,13 +509,14 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             const first = Math.min(a, b);
             terminal.select(first % terminal.cols, Math.floor(first / terminal.cols), Math.max(1, Math.abs(b - a) + 1));
           }
-          selectionRaf = requestAnimationFrame(autoScrollSelection);
+          selectionRaf = window.setTimeout(autoScrollSelection, 55) as unknown as number;
         };
         let lastSelectionCol = 0;
         const onTouchStart = (event: TouchEvent) => {
           if (event.touches.length !== 1) { clearTimer(); return; }
           const touch = event.touches[0];
           lastY = touch.clientY;
+          accumulatedScrollLines = 0;
           selectionPointerY = touch.clientY;
           lastSelectionCol = toCell(touch).col;
           touchStartX = touch.clientX;
@@ -547,13 +549,20 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           lastY = touch.clientY;
           if (Math.abs(deltaY) < 3) return;
           event.preventDefault();
-          screenEl.dispatchEvent(new WheelEvent('wheel', {
-            deltaY, clientX: touch.clientX, clientY: touch.clientY, bubbles: true,
-          }));
+          // Synthetic WheelEvents are not trusted and may be ignored by
+          // xterm/browser handlers. Move xterm's viewport directly.
+          const lineHeightPx = Math.max(1, screenEl.getBoundingClientRect().height / terminal.rows);
+          const fractionalLines = deltaY / lineHeightPx;
+          accumulatedScrollLines += fractionalLines;
+          const wholeLines = Math.trunc(accumulatedScrollLines);
+          if (wholeLines !== 0) {
+            terminal.scrollLines(wholeLines);
+            accumulatedScrollLines -= wholeLines;
+          }
         };
         const onTouchEnd = (event: TouchEvent) => {
           clearTimer();
-          cancelAnimationFrame(selectionRaf);
+          clearTimeout(selectionRaf);
           if (selecting) {
             event.preventDefault();
             selecting = false;
