@@ -16,6 +16,7 @@ import MobileClaudeCodePanel from '@/components/features/mobile/mobile-claude-co
 import MobileCodexPanel from '@/components/features/mobile/mobile-codex-panel';
 import AgentSessionsPanel from '@/components/features/workspace/agent-sessions-panel';
 import MobileTerminalToolbar from '@/components/features/mobile/mobile-terminal-toolbar';
+import MobileTerminalHistory from '@/components/features/mobile/mobile-terminal-history';
 import PaneAgentModePrompt from '@/components/features/workspace/pane-agent-mode-prompt';
 import { formatTabTitle, isShellProcess } from '@/lib/tab-title';
 import { isAppShortcut, isClearShortcut, isFocusInputShortcut, isShiftEnter } from '@/lib/keyboard-shortcuts';
@@ -243,11 +244,60 @@ const MobileSurfaceView = ({
     return true;
   }, []);
 
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyContent, setHistoryContent] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyRequestIdRef = useRef(0);
+
+  const openTerminalHistory = useCallback(async () => {
+    const workspaceId = layoutWsId;
+    const session = activeTab?.sessionName;
+    if (!workspaceId || !session) return;
+
+    const requestId = ++historyRequestIdRef.current;
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    // Release the virtual keyboard while browsing terminal history.
+    if (document.activeElement instanceof HTMLElement &&
+        document.activeElement.matches('.xterm-helper-textarea')) {
+      document.activeElement.blur();
+    }
+    try {
+      const query = new URLSearchParams({ workspace: workspaceId, session });
+      const response = await fetch(`/api/terminal/history?${query}`, { cache: 'no-store' });
+      const data: { content?: string; error?: string } = await response.json();
+      if (!response.ok) throw new Error(data.error || '履歴の取得に失敗しました');
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryContent(data.content ?? '');
+    } catch (err) {
+      if (requestId !== historyRequestIdRef.current) return;
+      setHistoryError(err instanceof Error ? err.message : '通信エラー');
+    } finally {
+      if (requestId === historyRequestIdRef.current) setHistoryLoading(false);
+    }
+  }, [layoutWsId, activeTab?.sessionName]);
+
+  const closeTerminalHistory = useCallback(() => {
+    historyRequestIdRef.current++;
+    setHistoryOpen(false);
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHistoryContent(null);
+  }, []);
+
+  useEffect(() => {
+    closeTerminalHistory();
+    return () => { historyRequestIdRef.current++; };
+  }, [layoutWsId, activeTab?.sessionName, closeTerminalHistory]);
+
   const { terminalRef, write, clear, reset, fit, focus, isReady, getBufferText, copyTerminalText } = useTerminal({
     theme: terminalTheme.colors,
     fontSize: isAgentPanel ? undefined : MOBILE_FONT_SIZE,
     lineHeight: resolveLineHeight(configLineHeight, configLineHeightCustom),
     onInput: (data) => wsActionsRef.current.sendStdin(data),
+    onHistoryRequested: () => { if (!historyOpen && !historyLoading) void openTerminalHistory(); },
     onResize: (cols, rows) => {
       wsActionsRef.current.sendResize(cols, rows);
       if (waitingForResizeRef.current) {
@@ -864,6 +914,16 @@ const MobileSurfaceView = ({
 
       {!isAgentPanel && !isWebBrowser && !isDiff && !isAgentSessionList && status === 'connected' && (
         <MobileTerminalToolbar sendStdin={sendWebStdin} terminalConnected={status === 'connected'} onCopy={() => void copyTerminalText()} onFocusTerminal={focus} />
+      )}
+
+      {historyOpen && (
+        <MobileTerminalHistory
+          content={historyContent}
+          loading={historyLoading}
+          error={historyError}
+          onClose={closeTerminalHistory}
+          onReload={() => void openTerminalHistory()}
+        />
       )}
 
       {agentModePrompt && agentModePrompt.tabId === activeTabId && panelType === 'terminal' && (
