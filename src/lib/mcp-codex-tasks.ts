@@ -133,7 +133,10 @@ const itemsFor = (record: TaskRecord, state: CodexGuiState) => {
   const i = state.items.findIndex((item) => item.id === record.userItemId);
   // Never include earlier-thread or unrelated output when the task's user
   // message is no longer in the bounded App Server UI history.
-  return i < 0 ? [] : state.items.slice(i + 1);
+  if (i < 0) return [];
+  const afterTask = state.items.slice(i + 1);
+  const nextUserIndex = afterTask.findIndex((item) => item.type === 'user');
+  return nextUserIndex < 0 ? afterTask : afterTask.slice(0, nextUserIndex);
 };
 const refresh = async (record: TaskRecord) => {
   if (isFinal(record.status)) return;
@@ -201,11 +204,15 @@ const execute = async (record: TaskRecord, instruction: string): Promise<void> =
     record.userItemId = lastUser?.id || null;
     record.status = result.approvals.length ? 'awaiting_approval' : 'running';
     await persist(record);
+    // subscribe() immediately invokes the callback. Register the unsubscribe
+    // handle first, otherwise a very short completed turn can leak a listener.
+    let registered = false;
     const unsubscribe = runtime.subscribe((state) => {
-      if (state.threadId !== record.threadId || isFinal(record.status)) return;
+      if (!registered || state.threadId !== record.threadId || isFinal(record.status)) return;
       void refresh(record).catch(() => {});
     });
     unsubs.set(record.taskId, unsubscribe);
+    registered = true;
     await refresh(record);
   } catch (error) {
     record.error = (error instanceof Error ? error.message : String(error)).slice(0, 700);
