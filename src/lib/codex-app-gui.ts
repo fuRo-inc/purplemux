@@ -178,6 +178,9 @@ export class CodexGuiRuntime {
   }
 
   private handleNotification(method: string, params: Json): void {
+    // A single App Server can have several loaded Codex threads. Only render
+    // events from the thread currently attached to this Purplemux tab.
+    if (typeof params.threadId === 'string' && params.threadId !== this.state.threadId) return;
     const item = asRecord(params.item);
     const itemId = asString(params.itemId) || asString(item.id);
     const type = asString(item.type);
