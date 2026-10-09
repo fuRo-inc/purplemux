@@ -28,6 +28,8 @@ const nextConfig: NextConfig = {
     ],
   },
   reactStrictMode: true,
+  // Permit HMR when opening the development server through the NUC's Tailscale IP.
+  ...(process.env.NODE_ENV === 'development' ? { allowedDevOrigins: ['100.64.0.4'] } : {}),
   experimental: {
     optimizePackageImports: ['react-icons'],
   },
