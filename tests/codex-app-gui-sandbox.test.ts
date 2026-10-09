@@ -91,10 +91,35 @@ describe('Codex App Server sandbox RPC encoding', () => {
     });
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     await runtime.start();
+    expect(rpc).toHaveBeenCalledWith('initialize', {
+      clientInfo: { name: 'purplemux', title: 'Purplemux', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
+    }, 25000);
+    expect(rpc.mock.calls[0][0]).toBe('initialize');
     expect(rpc).toHaveBeenCalledWith('thread/resume', {
       threadId: threadA, sandbox: 'read-only', approvalPolicy: 'on-request',
     }, 40000);
     expect(spawn).toHaveBeenCalledTimes(1);
+    runtime.terminate();
+  });
+
+  it('stops initialization if experimentalApi negotiation is rejected', async () => {
+    const { runtime, internal, rpc } = setup('read-only', threadA);
+    internal.state.ready = false;
+    internal.state.running = false;
+    vi.spyOn(internal, 'readStored').mockResolvedValue(undefined);
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      kill: vi.fn(),
+    });
+    vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+    rpc.mockImplementation(async (method) => {
+      if (method === 'initialize') throw new Error('experimentalApi not supported');
+      return {};
+    });
+    await expect(runtime.start()).rejects.toThrow('experimentalApi not supported');
+    expect(rpc.mock.calls.map(([method]) => method)).toEqual(['initialize']);
+    expect(runtime.snapshot().ready).toBe(false);
     runtime.terminate();
   });
 

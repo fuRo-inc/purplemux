@@ -388,6 +388,8 @@ export class CodexGuiRuntime {
     child.on('exit', (code) => this.exit('Codex App Server exited (' + String(code) + ')' + (stderr ? ': ' + stderr.slice(-350) : '')));
     await this.request('initialize', {
       clientInfo: { name: 'purplemux', title: 'Purplemux', version: '0.1.0' },
+      // thread/settings/update is experimental and required for fail-closed sandbox switching.
+      capabilities: { experimentalApi: true },
     }, 25000);
     this.sendMessage({ method: 'initialized' });
     this.state.ready = true;
