@@ -62,3 +62,24 @@ stdin/stdoutの1行単位JSONをCLIのログ出力と混同しない。stderrは
 `~/.codex/sessions` のJSONLは履歴の補助手段にはなっても、**ライブUIや承認処理の正規APIとして扱わない**。
 古い既存のCodex TUIプロセスは、別のApp Serverプロセスへ自動的に再接続できるとは限らない。
 フォールバックを残して移行する。
+
+## 2026-10-09: App Server Chat の初期実装（未検証）
+
+- NUC: `codex-cli 0.160.1`、GMKtec: `codex-cli 0.162.0` で `codex app-server --help` が使用できることをユーザーが確認。
+- `src/lib/codex-app-gui.ts` で JSON-RPC の初期化、`model/list`、`thread/start`／`thread/resume`／`thread/read`、`turn/start`／`turn/interrupt`、イベント受信、command/file-change承認を試作。
+- Local は `codex app-server`、Remote は登録済みSSH認証を利用した `ssh -T ... bash -lic 'exec codex app-server'` で起動。SSH先へTCPポートを追加公開しない。
+- `/api/codex-app/events` で状態をSSE配信、`/api/codex-app/action` で操作。PC／iPhoneは同じ `CodexAppChatPanel` を使用。
+- 新規Codexタブは `codex-chat`。従来 `codex-cli` は引き続きTUI互換として残す。
+- `~/.purplemux/codex-app-sessions` にtab単位でthread IDとモデル設定を保存する。Nextサーバー再起動後にthread/readによる会話履歴復元を試行する。
+- Codexの実行中にブラウザを閉じても、PurplemuxのNodeプロセスが稼働している限りChildProcessは維持される。ただしNodeプロセス自体の再起動中に実行中turnを維持する保証はまだない。
+- モデル選択、Thinking選択、Chat送信、逐次メッセージ表示、コマンド表示、承認・拒否の初期UIを実装。詳細diff表示、context/statusの全面統合、画像添付、履歴のページング、変更前後の構成比較は未実装。
+- **現時点ではNUC／GMKtec上のビルド・動作テストは未実施。**
+
+### スモークテスト
+
+1. NUCで `git pull --ff-only origin feat/remote-hosts`、`pnpm exec tsc --noEmit` を実行しエラーがないことを確認。
+2. `pnpm dev` で起動し、Local Workspaceの新規Codex Chatでモデル一覧、Thinking、送信、回答のストリーミングを確認。
+3. GMKtecのRemote Workspaceでも同じ操作を実行し、CodexがGMKtec側の作業ディレクトリで動くことを確認。
+4. ファイル変更・権限承認を伴う依頼を試し、承認カードと拒否・許可を検証。
+5. PCで新規Chat→ブラウザ再読み込み→同じthreadIdと履歴を確認。iPhoneから同じタブへアクセスした場合も表示が同期することを確認。
+6. 既存のCodex TUIタブと通常Terminalが従来どおり動くことを確認。
