@@ -18,6 +18,7 @@ interface IUseTerminalOptions {
   fontSize?: number;
   lineHeight?: number;
   onInput?: (data: string) => void;
+  onHistoryRequested?: () => void;
   onResize?: (cols: number, rows: number) => void;
   onTitleChange?: (title: string) => void;
   customKeyEventHandler?: (event: KeyboardEvent) => boolean;
@@ -76,7 +77,7 @@ const loadFonts = () => {
   return fontLoadPromise;
 };
 
-const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT_LINE_HEIGHT, onInput, onResize, onTitleChange, customKeyEventHandler }: IUseTerminalOptions = {}) => {
+const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT_LINE_HEIGHT, onInput, onResize, onTitleChange, customKeyEventHandler, onHistoryRequested }: IUseTerminalOptions = {}) => {
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
   const terminalRef = useCallback((node: HTMLDivElement | null) => {
     setContainerNode(node);
@@ -90,11 +91,11 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
   const [isReady, setIsReady] = useState(false);
   const t = useTranslations('terminal');
 
-  const callbacksRef = useRef({ theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, t });
+  const callbacksRef = useRef({ theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, onHistoryRequested, t });
 
   useEffect(() => {
-    callbacksRef.current = { theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, t };
-  }, [theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, t]);
+    callbacksRef.current = { theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, onHistoryRequested, t };
+  }, [theme, fontSize, lineHeight, onInput, onResize, onTitleChange, customKeyEventHandler, onHistoryRequested, t]);
 
   const drainWriteQueue = useCallback(() => {
     if (isWritingRef.current) return;
@@ -474,6 +475,13 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
         let startCell: { col: number; row: number } | null = null;
         let selectionRaf = 0;
         let selectionPointerY = 0;
+        let historyRequestedForGesture = false;
+        const requestStoredHistory = () => {
+          if (!historyRequestedForGesture && callbacksRef.current.onHistoryRequested) {
+            historyRequestedForGesture = true;
+            callbacksRef.current.onHistoryRequested();
+          }
+        };
         const clearTimer = () => { if (selectTimer) clearTimeout(selectTimer); selectTimer = null; };
         const toCell = (touch: Touch) => {
           const rect = screenEl.getBoundingClientRect();
@@ -501,6 +509,12 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           else if (selectionPointerY > rect.bottom - edge) lines = Math.max(1, Math.ceil((selectionPointerY - (rect.bottom - edge)) / 14));
           if (lines) {
             terminal.scrollLines(lines);
+            if (lines < 0 && terminal.buffer.active.viewportY === 0) {
+              selecting = false;
+              requestStoredHistory();
+              selectionRaf = 0;
+              return;
+            }
             const row = Math.max(0, Math.min(terminal.rows - 1,
               Math.floor((selectionPointerY - rect.top) / (rect.height / terminal.rows))));
             const fakeEnd = { col: lastSelectionCol, row: row + terminal.buffer.active.viewportY };
@@ -517,6 +531,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           const touch = event.touches[0];
           lastY = touch.clientY;
           accumulatedScrollLines = 0;
+          historyRequestedForGesture = false;
           selectionPointerY = touch.clientY;
           lastSelectionCol = toCell(touch).col;
           touchStartX = touch.clientX;
@@ -558,6 +573,11 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
           if (wholeLines !== 0) {
             terminal.scrollLines(wholeLines);
             accumulatedScrollLines -= wholeLines;
+            // A nested tmux owns earlier output. When the xterm scrollback
+            // boundary is reached, open the tmux-backed history instead.
+            if (wholeLines < 0 && terminal.buffer.active.viewportY === 0) {
+              requestStoredHistory();
+            }
           }
         };
         const onTouchEnd = (event: TouchEvent) => {
@@ -570,7 +590,7 @@ const useTerminal = ({ theme, fontSize = DEFAULT_FONT_SIZE, lineHeight = DEFAULT
             terminal.focus();
           }
         };
-        const onTouchCancel = () => { clearTimer(); cancelAnimationFrame(selectionRaf); selecting = false; };
+        const onTouchCancel = () => { clearTimer(); clearTimeout(selectionRaf); selecting = false; };
         containerNode.addEventListener('touchstart', onTouchStart, { passive: true });
         containerNode.addEventListener('touchmove', onTouchMove, { passive: false });
         containerNode.addEventListener('touchend', onTouchEnd, { passive: false });
