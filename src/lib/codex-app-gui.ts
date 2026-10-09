@@ -369,7 +369,7 @@ export class CodexGuiRuntime {
               })),
             // Codex 0.160.x still includes a deprecated speed-tier list.
             ...(
-              (Array.isArray(value.serviceTiers) ? value.serviceTiers : []).length === 0 &&
+              !(Array.isArray(value.serviceTiers) && value.serviceTiers.some((tier) => asString(asRecord(tier).id) === 'fast')) &&
               Array.isArray(value.additionalSpeedTiers)
                 ? value.additionalSpeedTiers.filter((tier) => tier === 'fast')
                     .map(() => ({ id: 'fast', name: 'Fast', description: '' }))
