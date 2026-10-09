@@ -390,10 +390,9 @@ export class CodexGuiRuntime {
       }
       const active = this.state.models.find((item) =>
         item.model === (this.state.model || this.state.models.find((entry) => entry.isDefault)?.model));
-      if (this.state.fastMode && !active?.serviceTiers.some((tier) => isFastTier(tier.id))) {
-        this.state.fastMode = false;
-        await this.store();
-      }
+      // Missing catalog metadata does not establish that Fast is unsupported.
+      // Preserve an explicit opt-in; the App Server remains authoritative when
+      // the next turn is started. "priority" is the canonical request tier.
     } catch (error) {
       this.state.error = 'モデル一覧を取得できません: ' + (error instanceof Error ? error.message : String(error));
     }
@@ -532,9 +531,8 @@ export class CodexGuiRuntime {
         }
         const model = this.state.models.find((entry) =>
           entry.model === (this.state.model || this.state.models.find((m) => m.isDefault)?.model));
-        if (this.state.fastMode && !model?.serviceTiers.some((tier) => isFastTier(tier.id))) {
-          this.state.fastMode = false;
-        }
+        // A thread may have been created on an older CLI where model/list
+        // did not advertise service tiers. Keep the user's explicit setting.
         this.restore(history);
         await this.store();
       } catch (error) {
@@ -625,8 +623,10 @@ export class CodexGuiRuntime {
     };
     if (args.model !== undefined) {
       if (!this.state.models.some((m) => m.model === args.model)) throw new Error('Model is not available on this host');
+      const modelChanged = this.state.model !== args.model;
       this.state.model = args.model;
       if (args.effort === undefined) this.state.effort = null;
+      if (modelChanged && args.fastMode === undefined) this.state.fastMode = false;
     }
     if (args.effort !== undefined) {
       const active = this.state.models.find((m) => m.model === (this.state.model || this.state.models.find((m) => m.isDefault)?.model));
@@ -647,12 +647,11 @@ export class CodexGuiRuntime {
     }
     const activeModel = this.state.models.find((m) =>
       m.model === (this.state.model || this.state.models.find((x) => x.isDefault)?.model));
-    const supportedFastTier = activeModel?.serviceTiers.find((tier) => isFastTier(tier.id))?.id ?? null;
-    if (args.fastMode === true && !supportedFastTier) {
-      throw new Error('このHostのモデル一覧ではFastが利用可能として通知されていません');
-    }
+    // Some Codex App Server model catalogs omit speed-tier metadata entirely.
+    // Allow an explicit Fast request (never automatic); Codex validates whether
+    // the selected model/account actually supports the priority tier.
+    const requestedFastTier = activeModel?.serviceTiers.find((tier) => isFastTier(tier.id))?.id ?? 'priority';
     if (args.fastMode !== undefined) this.state.fastMode = args.fastMode;
-    else if (!supportedFastTier) this.state.fastMode = false;
 
     try {
       if (this.state.threadId &&
@@ -696,7 +695,7 @@ export class CodexGuiRuntime {
           if (!cwd.startsWith('/')) throw new Error('Codex workspace directory must be absolute');
           const result = await this.request('thread/start', {
             cwd, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandboxMode,
-            serviceTier: this.state.fastMode ? supportedFastTier : 'default',
+            serviceTier: this.state.fastMode ? requestedFastTier : 'default',
             ...(this.state.model ? { model: this.state.model } : {}),
           }, 45000);
           const id = asString(asRecord(result.thread).id);
@@ -713,7 +712,7 @@ export class CodexGuiRuntime {
           input: [{ type: 'text', text, text_elements: [] }],
           ...(this.state.model ? { model: this.state.model } : {}),
           ...(this.state.effort ? { effort: this.state.effort } : {}),
-          serviceTierForTurn: this.state.fastMode ? supportedFastTier : 'default',
+          serviceTierForTurn: this.state.fastMode ? requestedFastTier : 'default',
         }, 45000);
         this.state.turnId = asString(asRecord(response.turn).id) || this.state.turnId;
       } catch (error) {
