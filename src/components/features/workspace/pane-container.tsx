@@ -1058,7 +1058,7 @@ const PaneContainer = memo(({ paneId, paneNumber }: IPaneContainerProps) => {
 
     window.addEventListener('purplemux-start-agent', handleStartAgentRequest);
     return () => window.removeEventListener('purplemux-start-agent', handleStartAgentRequest);
-  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, handleSwitchPanelType, paneId]);
+  }, [activeTabId, ensureAgentInstalled, handleNewClaudeSession, handleNewCodexSession, handleSwitchPanelType, paneId, isRemoteWorkspace]);
 
   const handleSwitchToAgentMode = useCallback(async () => {
     const prompt = agentModePrompt;
