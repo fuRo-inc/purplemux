@@ -119,6 +119,23 @@ describe('Codex App Server sandbox RPC encoding', () => {
     runtime.terminate();
   });
 
+  it('does not forward Next standalone configuration or Purplemux credentials to Codex commands', async () => {
+    vi.stubEnv('__NEXT_PRIVATE_STANDALONE_CONFIG', '{"output":"standalone"}');
+    vi.stubEnv('__PMUX_MCP_INTERNAL_TOKEN', 'test-only'); vi.stubEnv('NEXTAUTH_SECRET', 'test-only');
+    try {
+      const { runtime, internal } = setup('read-only');
+      vi.spyOn(internal, 'readStored').mockResolvedValue(undefined);
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(),
+      });
+      vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+      await runtime.start();
+      const env = vi.mocked(spawn).mock.calls[0][2]!.env!;
+      expect(env).not.toHaveProperty('__NEXT_PRIVATE_STANDALONE_CONFIG');
+      expect(env).not.toHaveProperty('__PMUX_MCP_INTERNAL_TOKEN'); expect(env).not.toHaveProperty('NEXTAUTH_SECRET');
+      expect(process.env.__NEXT_PRIVATE_STANDALONE_CONFIG).toBe('{"output":"standalone"}'); runtime.terminate();
+    } finally { vi.unstubAllEnvs(); }
+  });
   it('stops initialization if experimentalApi negotiation is rejected', async () => {
     const { runtime, internal, rpc } = setup('read-only', threadA);
     internal.state.ready = false;
@@ -467,5 +484,225 @@ describe('Codex approval decisions', () => {
     const { runtime } = approvalSetup();
     runtime.snapshot().approvals[0].availableDecisions!.push({ acceptWithExecpolicyAmendment: { execpolicy_amendment: ['sh'] } });
     await expect(runtime.action('approve', { requestId: 123, decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['sh'] } } })).rejects.toThrow('Invalid');
+  });
+});
+
+describe('GUI-approved long-lived Task Session lease', () => {
+  const session = () => ({ targetFingerprint: '25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6', sessionId: 'session-approved', expiresAt: new Date(Date.now() + 60000).toISOString(),
+    text: 'Build approved repo', directory: cwd, hostId: 'local', workspaceId: workspace.id, tabId: tab.id,
+    validate: vi.fn(async () => {}), onLost: vi.fn() });
+  const optIn = () => { vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1'); };
+  afterEach(() => vi.unstubAllEnvs());
+  const confirmed = (rpc: ReturnType<typeof setup>['rpc'], internal: RuntimeInternal) => {
+    let turn = 0;
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'thread/start') return {
+        thread: { id: threadA, cwd }, sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
+      };
+      if (method === 'thread/settings/update') {
+        queueMicrotask(() => internal.handleNotification('thread/settings/updated', {
+          threadId: params.threadId, threadSettings: {
+            sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy,
+          },
+        }));
+        return {};
+      }
+      if (method === 'turn/start') return { turn: { id: 'session-turn-' + ++turn } };
+      return {};
+    });
+  };
+  it('rejects a cached App Server whose connection fingerprint differs from the approval', async () => {
+    optIn(); const { runtime, rpc } = setup('read-only');
+    await expect(runtime.runTaskSessionTurn({ ...session(), targetFingerprint: 'changed-remote-target' })).rejects.toThrow('target connection changed');
+    expect(rpc).not.toHaveBeenCalled();
+    runtime.terminate();
+  });
+  it('runs multiple turns in one pinned thread, blocks manual GUI actions and preserves durable settings', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only', threadB); confirmed(rpc, internal);
+    vi.mocked(internal.store).mockRestore(); const options = session();
+    await runtime.runTaskSessionTurn(options);
+    expect(savedSettings()).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'on-request' });
+    expect(rpc.mock.calls.some(([method, params]) => method === 'thread/settings/update' && params.threadId === threadB)).toBe(false);
+    await expect(runtime.action('send', { text: 'manual' })).rejects.toThrow('MCP task');
+    await expect(runtime.action('settings', { sandboxMode: 'workspace-write' })).rejects.toThrow('MCP task');
+    internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
+    await internal.actions.catch(() => {});
+    expect(runtime.snapshot()).toMatchObject({ busy: false, taskPermissionsActive: true, sandboxMode: 'danger-full-access', approvalPolicy: 'never' });
+    await runtime.runTaskSessionTurn({ ...options, pinnedThreadId: threadA, text: 'Fix and rebuild' });
+    expect(rpc.mock.calls.filter(([m]) => m === 'thread/start')).toHaveLength(1);
+    expect(rpc.mock.calls.filter(([m]) => m === 'turn/start')).toHaveLength(2);
+    internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-2', status: 'completed' } });
+    await runtime.finishTaskSession(options.sessionId);
+    expect(runtime.snapshot()).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'on-request', taskPermissionsActive: false });
+    expect(savedSettings()).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'on-request' });
+    expect(options.onLost).not.toHaveBeenCalled(); runtime.terminate();
+  });
+  it.each(['PURPLEMUX_MCP_ALLOW_WRITES', 'PURPLEMUX_MCP_ALLOW_FULL_ACCESS'])('blocks missing %s before any RPC', async (flag) => {
+    optIn(); vi.stubEnv(flag, '0'); const { runtime, rpc } = setup('read-only');
+    await expect(runtime.runTaskSessionTurn(session())).rejects.toThrow('disabled'); expect(rpc).not.toHaveBeenCalled(); runtime.terminate();
+  });
+  it.each([
+    ['missing settings', {}],
+    ['missing sandbox', { approvalPolicy: 'never' }],
+    ['missing approval policy', { sandbox: { type: 'dangerFullAccess' } }],
+    ['wrong sandbox', { sandbox: { type: 'workspaceWrite' }, approvalPolicy: 'never' }],
+    ['wrong approval policy', { sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'on-request' }],
+  ])('fails closed before the first turn when thread/start returns %s', async (_failure, settings) => {
+    optIn(); const { runtime, rpc } = setup('read-only'); const options = session();
+    rpc.mockImplementation(async (method) => {
+      if (method === 'thread/start') return { thread: { id: threadA, cwd }, ...settings };
+      return {};
+    });
+    await expect(runtime.runTaskSessionTurn(options)).rejects.toThrow('Full Access thread/start settings not confirmed');
+    expect(rpc.mock.calls.map(([method]) => method)).toEqual(['thread/start']);
+    expect(rpc.mock.calls.some(([m]) => m === 'turn/start')).toBe(false);
+    expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
+    expect(options.onLost).toHaveBeenCalledOnce();
+  });
+  it.each(['reject', 'missing', 'wrong'])('fails closed before the second turn when changed effective settings confirmation is %s', async (failure) => {
+    optIn(); vi.useFakeTimers();
+    const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    try {
+      await runtime.runTaskSessionTurn(options);
+      expect(rpc.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(1);
+      internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
+      await internal.actions;
+      internal.handleNotification('thread/settings/updated', {
+        threadId: threadA, threadSettings: { sandboxPolicy: { type: 'workspaceWrite' }, approvalPolicy: 'on-request' },
+      });
+      const implementation = rpc.getMockImplementation()!;
+      rpc.mockImplementation(async (method, params) => {
+        if (method !== 'thread/settings/update') return implementation(method, params);
+        if (failure === 'reject') throw new Error('RPC timeout');
+        if (failure === 'wrong') queueMicrotask(() => internal.handleNotification('thread/settings/updated', {
+          threadId: params.threadId, threadSettings: { sandboxPolicy: { type: 'workspaceWrite' }, approvalPolicy: 'on-request' },
+        }));
+        return {};
+      });
+      // Attach the rejection assertion before advancing the confirmation timeout.
+      const rejected = expect(runtime.runTaskSessionTurn({ ...options, pinnedThreadId: threadA })).rejects.toThrow(
+        failure === 'reject' ? 'RPC timeout' : 'Thread settings notification not confirmed',
+      );
+      await vi.advanceTimersByTimeAsync(10000);
+      await rejected;
+      expect(rpc.mock.calls.filter(([method]) => method === 'thread/settings/update')).toHaveLength(2);
+      expect(rpc).toHaveBeenLastCalledWith('thread/settings/update', {
+        threadId: threadA, sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
+      }, 30000);
+      expect(rpc.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(1);
+      expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only', approvalPolicy: 'on-request' });
+      expect(options.onLost).toHaveBeenCalledOnce();
+      await expect(runtime.runTaskSessionTurn({ ...options, pinnedThreadId: threadA })).rejects.toThrow('unavailable');
+      expect(rpc.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(1);
+    } finally { runtime.terminate(); vi.useRealTimers(); }
+  });
+  it('accepts updates without notifications while cached effective Full Access/never remains confirmed', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    const implementation = rpc.getMockImplementation()!;
+    rpc.mockImplementation(async (method, params) => method === 'thread/settings/update' ? {} : implementation(method, params));
+    try {
+      await runtime.runTaskSessionTurn(options);
+      internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
+      await internal.actions;
+      await runtime.runTaskSessionTurn({ ...options, pinnedThreadId: threadA });
+      expect(rpc.mock.calls.filter(([method]) => method === 'thread/start')).toHaveLength(1);
+      expect(rpc.mock.calls.filter(([method]) => method === 'thread/settings/update')).toHaveLength(2);
+      expect(rpc.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(2);
+      expect(runtime.snapshot()).toMatchObject({ running: true, taskPermissionsActive: true, sandboxMode: 'danger-full-access', approvalPolicy: 'never' });
+      internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-2', status: 'completed' } });
+      await internal.actions;
+      // Restoring GUI rights still requires a matching effective-settings notification.
+      rpc.mockImplementation(implementation);
+      await runtime.finishTaskSession(options.sessionId);
+      expect(runtime.snapshot()).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'on-request', taskPermissionsActive: false });
+      expect(options.onLost).not.toHaveBeenCalled();
+    } finally { runtime.terminate(); }
+  });
+  it('checks durable approval again after settings confirmation and before turn/start', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    options.validate.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Revoked during setup'));
+    await expect(runtime.runTaskSessionTurn(options)).rejects.toThrow('Revoked');
+    expect(rpc.mock.calls.some(([m]) => m === 'turn/start')).toBe(false);
+    expect(options.onLost).toHaveBeenCalledOnce();
+  });
+  it('rejects changed host/cwd/workspace/tab without granting permissions', async () => {
+    optIn(); const { runtime, rpc } = setup('read-only');
+    for (const changed of [{ hostId: 'other' }, { directory: '/other' }, { workspaceId: 'other' }, { tabId: 'other' }]) {
+      await expect(runtime.runTaskSessionTurn({ ...session(), ...changed })).rejects.toThrow('target');
+    }
+    expect(rpc).not.toHaveBeenCalled(); runtime.terminate();
+  });
+  it('interrupts and disconnects a running lease on finish, restoring local permissions', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    await runtime.runTaskSessionTurn(options); await runtime.finishTaskSession(options.sessionId);
+    expect(rpc.mock.calls.some(([m]) => m === 'turn/interrupt')).toBe(true);
+    expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
+    expect(options.onLost).toHaveBeenCalledOnce();
+  });
+  it('interrupts a known active turn while turn/start acknowledgement is still pending', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); rpc.mockRestore(); const options = session();
+    let started!: () => void;
+    const inFlight = new Promise<void>((resolve) => { started = resolve; });
+    const wire = vi.spyOn(internal, 'sendMessage').mockImplementation((message) => {
+      const params = message.params as RpcParams;
+      if (message.method === 'turn/start') {
+        internal.handleNotification('turn/started', { threadId: threadA, turn: { id: 'pending-turn' } });
+        started(); return; // No turn/start response; use the actual pending RPC map.
+      }
+      const result = message.method === 'thread/start' ? { thread: { id: threadA, cwd }, sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never' }
+        : message.method === 'thread/settings/update' ? {} : {};
+      if (message.method === 'thread/settings/update') {
+        queueMicrotask(() => internal.handleNotification('thread/settings/updated', {
+          threadId: params.threadId, threadSettings: {
+            sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy,
+          },
+        }));
+      }
+      internal.handleLine(JSON.stringify({ id: message.id, result }));
+    });
+    const run = runtime.runTaskSessionTurn(options).then(() => null, (error) => error);
+    await inFlight; await runtime.finishTaskSession(options.sessionId);
+    expect(await run).toBeInstanceOf(Error);
+    expect(wire.mock.calls.some(([message]) => message.method === 'turn/interrupt')).toBe(true);
+    expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
+    expect(options.onLost).toHaveBeenCalledOnce();
+  });
+  it('disconnects if saved GUI permissions are not confirmed on idle release', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    await runtime.runTaskSessionTurn(options);
+    internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
+    rpc.mockImplementation(async () => ({}));
+    await expect(runtime.finishTaskSession(options.sessionId)).rejects.toThrow('not confirmed');
+    expect(runtime.snapshot()).toMatchObject({ running: false, sandboxMode: 'read-only', taskPermissionsActive: false });
+    await expect(runtime.action('send', { text: 'manual' })).rejects.toThrow('unavailable');
+  });
+  it('handles completion arriving before the turn/start response without losing the lease', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    const implementation = rpc.getMockImplementation()!;
+    rpc.mockImplementation(async (method, params) => {
+      if (method === 'turn/start') {
+        internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
+        return { turn: { id: 'session-turn-1' } };
+      }
+      return implementation(method, params);
+    });
+    expect(await runtime.runTaskSessionTurn(options)).toMatchObject({ busy: false, lastTurnId: 'session-turn-1', taskPermissionsActive: true });
+    await runtime.finishTaskSession(options.sessionId); runtime.terminate();
+  });
+  it('expires a busy lease and refuses further use', async () => {
+    optIn(); vi.useFakeTimers();
+    try {
+      const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = { ...session(), expiresAt: new Date(Date.now() + 1000).toISOString() };
+      await runtime.runTaskSessionTurn(options); await vi.advanceTimersByTimeAsync(1001);
+      expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
+      expect(options.onLost).toHaveBeenCalledOnce();
+      await expect(runtime.runTaskSessionTurn({ ...options, pinnedThreadId: threadA })).rejects.toThrow('unavailable');
+    } finally { vi.useRealTimers(); }
+  });
+  it('revokes on failed completion and on process termination', async () => {
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
+    await runtime.runTaskSessionTurn(options);
+    internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'failed' } });
+    expect(runtime.snapshot().taskPermissionsActive).toBe(false); expect(options.onLost).toHaveBeenCalledOnce();
   });
 });

@@ -3,7 +3,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import { promises as fs } from 'fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { getRemoteHost } from '@/lib/remote-host-store';
 import type { IWorkspace, ITab } from '@/types/terminal';
 
@@ -81,6 +81,7 @@ export type CodexGuiState = {
   approvalPolicy: CodexGuiApprovalPolicy;
   fastMode: boolean;
   taskPermissionsActive?: boolean;
+  taskSessionId?: string;
   models: CodexGuiModel[];
   items: CodexGuiItem[];
   approvals: CodexGuiApproval[];
@@ -112,7 +113,57 @@ export class CodexGuiRuntime {
   private actions: Promise<unknown> = Promise.resolve();
   private taskTurnId: string | null = null;
   private earlyTaskCompletions = new Map<string, Json>();
+  private executionTargetFingerprint = createHash('sha256').update('local').digest('hex');
+  private sessionLease: {
+    sessionId: string; expiresAt: string; threadId: string | null;
+    validate: () => Promise<void>; onLost: () => void; timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   private temporaryPermissions: { sandboxMode: CodexGuiSandbox; approvalPolicy: CodexGuiApprovalPolicy } | null = null;
+  // thread/settings/update acknowledges with {}, while effective values arrive
+  // asynchronously in thread/settings/updated (and in thread/start).
+  private effectiveThreadSettings: { threadId: string; sandboxPolicyType: string; approvalPolicy: string } | null = null;
+  private settingsConfirmation: {
+    threadId: string; sandboxPolicyType: string; approvalPolicy: string; resolve: () => void;
+  } | null = null;
+
+  private noteEffectiveThreadSettings(threadId: string, sandboxPolicyType: string, approvalPolicy: string): void {
+    if (!threadId || !sandboxPolicyType || !approvalPolicy) return;
+    this.effectiveThreadSettings = { threadId, sandboxPolicyType, approvalPolicy };
+    const pending = this.settingsConfirmation;
+    if (pending && pending.threadId === threadId && pending.sandboxPolicyType === sandboxPolicyType &&
+        pending.approvalPolicy === approvalPolicy) pending.resolve();
+  }
+
+  private async updateSessionThreadSettings(sandboxMode: CodexGuiSandbox, approvalPolicy: CodexGuiApprovalPolicy): Promise<void> {
+    const threadId = this.state.threadId;
+    if (!threadId || this.settingsConfirmation) throw new Error('Thread settings confirmation unavailable');
+    const sandboxPolicyType = toCodexAppSandboxPolicyType(sandboxMode);
+    const confirmed = () => this.effectiveThreadSettings?.threadId === threadId &&
+      this.effectiveThreadSettings.sandboxPolicyType === sandboxPolicyType &&
+      this.effectiveThreadSettings.approvalPolicy === approvalPolicy;
+    let signal!: () => void;
+    const notification = new Promise<void>((resolve) => { signal = resolve; });
+    const waiter = { threadId, sandboxPolicyType, approvalPolicy, resolve: signal };
+    this.settingsConfirmation = waiter;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      // The RPC acknowledgement itself does NOT contain the new settings.
+      await this.request('thread/settings/update', {
+        threadId, sandboxPolicy: { type: sandboxPolicyType }, approvalPolicy,
+      }, 30000);
+      // A no-op update produces no notification; accept only a previously
+      // server-confirmed effective state (thread/start or a prior notification).
+      if (!confirmed()) {
+        await Promise.race([notification, new Promise<void>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('Thread settings notification not confirmed')), 10000);
+        })]);
+      }
+      if (!confirmed() || !this.state.running || this.closed) throw new Error('Thread settings were not confirmed by Codex');
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (this.settingsConfirmation === waiter) this.settingsConfirmation = null;
+    }
+  }
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.actions.catch(() => {}).then(operation);
     this.actions = next;
@@ -146,6 +197,7 @@ export class CodexGuiRuntime {
       items: this.state.items.map((item) => ({ ...item })),
       approvals: structuredClone(this.state.approvals),
       taskPermissionsActive: this.temporaryPermissions !== null,
+      ...(this.sessionLease ? { taskSessionId: this.sessionLease.sessionId } : {}),
     };
   }
 
@@ -246,6 +298,13 @@ export class CodexGuiRuntime {
     // A single App Server can have several loaded Codex threads. Only render
     // events from the thread currently attached to this Purplemux tab.
     if (typeof params.threadId === 'string' && params.threadId !== this.state.threadId) return;
+    if (method === 'thread/settings/updated') {
+      const settings = asRecord(params.threadSettings);
+      this.noteEffectiveThreadSettings(asString(params.threadId),
+        asString(asRecord(settings.sandboxPolicy).type), asString(settings.approvalPolicy));
+      this.publish();
+      return;
+    }
     const item = asRecord(params.item);
     const itemId = asString(params.itemId) || asString(item.id);
     const type = asString(item.type);
@@ -274,7 +333,9 @@ export class CodexGuiRuntime {
         this.state.error = asString(asRecord(turn.error).message) || 'Codex turn failed';
       }
       this.state.approvals = [];
-      if (this.temporaryPermissions) {
+      if (this.sessionLease) {
+        if (this.state.lastTurnStatus !== 'completed') this.terminate();
+      } else if (this.temporaryPermissions) {
         void this.serialize(() => this.restoreTaskPermissions()).catch(() => {});
       }
     } else if (method === 'turn/diff/updated') {
@@ -442,6 +503,8 @@ export class CodexGuiRuntime {
           !Number.isInteger(host.port) || host.port < 1 || host.port > 65535) {
         throw new Error('Invalid remote SSH configuration');
       }
+      const { connectionFingerprint } = await import('@/lib/task-session-store');
+      this.executionTargetFingerprint = connectionFingerprint(host);
       command = 'ssh';
       // Interactive shell loads fnm/npm PATH; -T preserves clean JSON stdout.
       args = ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
@@ -454,6 +517,7 @@ export class CodexGuiRuntime {
     const childEnv: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
     for (const key of [
       '__PMUX_MCP_INTERNAL_TOKEN', '__PMUX_MCP_INTERNAL_PORT',
+      '__NEXT_PRIVATE_STANDALONE_CONFIG',
       'NEXTAUTH_SECRET', 'AUTH_PASSWORD', 'CONTROL_PLANE_API_KEY', 'OPENAI_ADMIN_KEY',
     ]) delete childEnv[key];
     const child = spawn(command, args, {
@@ -535,6 +599,8 @@ export class CodexGuiRuntime {
           sandbox: this.state.sandboxMode,
         }, 40000);
         this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || this.state.cwd;
+        this.noteEffectiveThreadSettings(this.state.threadId!,
+          asString(asRecord(result.sandbox).type), asString(result.approvalPolicy));
         // thread/resume may return a summary rather than all messages.
         // Recover the transcript explicitly from the durable local/remote thread.
         try {
@@ -723,6 +789,12 @@ export class CodexGuiRuntime {
     this.state.ready = false;
     this.state.busy = false;
     this.state.error = message;
+    this.effectiveThreadSettings = null;
+    if (this.sessionLease) {
+      const lease = this.sessionLease;
+      clearTimeout(lease.timer); this.sessionLease = null;
+      lease.onLost();
+    }
     if (this.temporaryPermissions) {
       Object.assign(this.state, this.temporaryPermissions);
       this.temporaryPermissions = null;
@@ -782,17 +854,103 @@ export class CodexGuiRuntime {
     });
   }
 
+  /** Only the durable, GUI-approved Task Session coordinator calls this entry point. */
+  async runTaskSessionTurn(options: {
+    targetFingerprint: string; sessionId: string; expiresAt: string; text: string; directory: string; hostId: string;
+    workspaceId: string; tabId: string; pinnedThreadId?: string;
+    validate: () => Promise<void>; onLost: () => void;
+  }): Promise<CodexGuiState> {
+    return this.serialize(async () => {
+      if (process.env.PURPLEMUX_MCP_ALLOW_WRITES !== '1' || process.env.PURPLEMUX_MCP_ALLOW_FULL_ACCESS !== '1') throw new Error('Full Access execution disabled');
+      await options.validate();
+      if (options.targetFingerprint !== this.executionTargetFingerprint) throw new Error('Runtime target connection changed; new App Server required');
+      if (this.closed || !this.state.ready || this.state.busy || this.state.approvals.length ||
+          options.workspaceId !== this.workspace.id || options.tabId !== this.tab.id ||
+          options.hostId !== this.executionHostId || this.getWorkspaceCwd() !== options.directory ||
+          Date.parse(options.expiresAt) <= Date.now()) throw new Error('Session target expired, changed or unavailable');
+      if (this.sessionLease && (this.sessionLease.sessionId !== options.sessionId || this.state.threadId !== this.sessionLease.threadId ||
+          this.state.threadId !== options.pinnedThreadId || this.state.cwd !== options.directory)) throw new Error('Session lease or pinned thread mismatch');
+      if (!this.sessionLease && (this.temporaryPermissions || options.pinnedThreadId)) throw new Error('Session lease lost; GUI reapproval required');
+      try {
+        if (!this.sessionLease) {
+          this.temporaryPermissions = { sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy };
+          const timer = setTimeout(() => this.expireTaskSession(), Math.max(1, Date.parse(options.expiresAt) - Date.now()));
+          timer.unref();
+          this.sessionLease = { sessionId: options.sessionId, expiresAt: options.expiresAt, threadId: null,
+            validate: options.validate, onLost: options.onLost, timer };
+          // A new session gets a dedicated thread; never alter an earlier GUI thread.
+          await this.actionInternal('new-thread', {});
+        } else {
+          this.sessionLease.validate = options.validate;
+          this.sessionLease.onLost = options.onLost;
+        }
+        this.taskTurnId = null; this.earlyTaskCompletions.clear();
+        this.state.sandboxMode = 'danger-full-access'; this.state.approvalPolicy = 'never';
+        return await this.actionInternal('send', { text: options.text });
+      } catch (error) {
+        // Includes uncertain RPC timeout: no subsequent turn may reuse this grant.
+        this.terminate();
+        throw error;
+      }
+    });
+  }
+
+  private expireTaskSession(): void {
+    const lease = this.sessionLease;
+    if (!lease) return;
+    if (this.state.busy && this.state.threadId && this.state.turnId) {
+      // Interrupt on the wire before disconnecting; bounded even if Codex hangs.
+      void this.request('turn/interrupt', { threadId: this.state.threadId, turnId: this.state.turnId }, 5000)
+        .catch(() => {}).finally(() => this.terminate());
+    } else if (this.state.busy || this.pending.size) {
+      this.terminate();
+    } else {
+      void this.finishTaskSession(lease.sessionId).then(() => lease.onLost()).catch(() => this.terminate());
+    }
+  }
+
+  async finishTaskSession(sessionId: string): Promise<void> {
+    // Break an in-flight setup immediately; it must never start after revocation.
+    if (this.sessionLease?.sessionId === sessionId && this.state.busy && (!this.state.turnId || this.pending.size > 0)) {
+      try {
+        if (this.state.threadId && this.state.turnId) {
+          await this.request('turn/interrupt', { threadId: this.state.threadId, turnId: this.state.turnId }, 5000);
+        }
+      } catch { /* An uncertain setup cannot retain Full Access. */ }
+      finally { this.terminate(); }
+    }
+    return this.serialize(async () => {
+      const lease = this.sessionLease;
+      if (!lease) return;
+      if (lease.sessionId !== sessionId) throw new Error('Refusing to release another session lease');
+      try {
+        if (this.state.busy) {
+          await this.actionInternal('interrupt', {});
+          // Interrupt acknowledgement need not mean completion. Disconnect any
+          // still-active process rather than changing its permissions mid-turn.
+          if (this.state.busy) { this.terminate(); return; }
+        }
+        await this.restoreTaskPermissions();
+        clearTimeout(lease.timer); this.sessionLease = null;
+      } catch (error) { this.terminate(); throw error; }
+    });
+  }
+
   private async restoreTaskPermissions(): Promise<void> {
     const saved = this.temporaryPermissions;
     if (!saved) return;
     try {
       // Always send a restoration even if local rollback made values equal.
       if (this.state.threadId && !this.closed) {
-        await this.request('thread/settings/update', {
-          threadId: this.state.threadId,
-          sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
-          approvalPolicy: saved.approvalPolicy,
-        }, 30000);
+        if (this.sessionLease) {
+          await this.updateSessionThreadSettings(saved.sandboxMode, saved.approvalPolicy);
+        } else {
+          await this.request('thread/settings/update', {
+            threadId: this.state.threadId,
+            sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
+            approvalPolicy: saved.approvalPolicy,
+          }, 30000);
+        }
       }
       Object.assign(this.state, saved);
       this.temporaryPermissions = null;
@@ -897,6 +1055,7 @@ export class CodexGuiRuntime {
     if (action === 'new-thread') {
       if (this.state.busy) throw new Error('Codex is working. Stop the current turn first.');
       this.state.threadId = null;
+      this.effectiveThreadSettings = null;
       this.state.cwd = this.getWorkspaceCwd();
       this.state.lastTurnId = null;
       this.state.lastTurnStatus = null;
@@ -930,10 +1089,31 @@ export class CodexGuiRuntime {
           if (!id) throw new Error('Codex did not return a thread ID');
           this.state.threadId = id;
           this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || cwd;
+          if (this.sessionLease) {
+            // thread/start is authoritative for the first turn; it also covers
+            // a no-op settings/update that emits no follow-up notification.
+            const sandboxPolicyType = asString(asRecord(result.sandbox).type);
+            const approvalPolicy = asString(result.approvalPolicy);
+            if (sandboxPolicyType !== 'dangerFullAccess' || approvalPolicy !== 'never') {
+              throw new Error('Full Access thread/start settings not confirmed by Codex');
+            }
+            this.noteEffectiveThreadSettings(id, sandboxPolicyType, approvalPolicy);
+          }
           if (this.temporaryPermissions && this.state.cwd.replace(/\/+$/, '') !== cwd.replace(/\/+$/, '')) {
             throw new Error('Codex working directory changed before task submission');
           }
           await this.store();
+        }
+        if (this.sessionLease) {
+          await this.sessionLease.validate();
+          if (Date.parse(this.sessionLease.expiresAt) <= Date.now() || this.state.cwd !== this.getWorkspaceCwd()) throw new Error('Session expired or cwd changed');
+          if (this.sessionLease.threadId && this.sessionLease.threadId !== this.state.threadId) throw new Error('Pinned session thread changed');
+          // The effective settings are confirmed via thread/start or
+          // thread/settings/updated; the immediate RPC reply is always {}.
+          await this.updateSessionThreadSettings('danger-full-access', 'never');
+          await this.sessionLease.validate();
+          if (Date.parse(this.sessionLease.expiresAt) <= Date.now()) throw new Error('Session expired');
+          this.sessionLease.threadId = this.state.threadId;
         }
         this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
         if (this.state.items.length > MAX_ITEMS) this.state.items.shift();
@@ -968,6 +1148,11 @@ export class CodexGuiRuntime {
 }
 
 export const getCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Promise<CodexGuiRuntime> => {
+  const { taskSessions } = await import('@/lib/task-session-store');
+  return taskSessions.withTabAccess(workspace.id, tab.id, true, () => loadCodexGuiRuntime(workspace, tab));
+};
+
+const loadCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Promise<CodexGuiRuntime> => {
   const key = workspace.id + ':' + tab.id;
   const existing = runtimes.get(key);
   if (existing) {

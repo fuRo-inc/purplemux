@@ -64,6 +64,22 @@ const handleLogout = async () => {
 };
 
 const Sidebar = () => {
+  const [pendingTasks, setPendingTasks] = useState(0);
+  useEffect(() => {
+    let disposed = false;
+    const controller = new AbortController();
+    const refresh = async () => {
+      try {
+        const response = await fetch('/api/task-sessions?summary=1', { cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
+        if (!response.ok) return;
+        const data = await response.json() as { pendingCount: number };
+        if (!disposed) setPendingTasks(data.pendingCount);
+      } catch { /* The Tasks page displays actionable API errors. */ }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 30000);
+    return () => { disposed = true; controller.abort(); clearInterval(timer); };
+  }, []);
   const t = useTranslations('sidebar');
   const tc = useTranslations('common');
   const router = useRouter();
@@ -682,7 +698,7 @@ const Sidebar = () => {
                   </div>
                 );
               })}
-              <Link href="/task-sessions" title="Task Sessions — 承認記録のみ、実行権限は未連携" className="rounded px-1 text-xs text-muted-foreground hover:bg-sidebar-accent">Tasks</Link>
+              <Link href="/task-sessions" title="Task Sessions — 承認待ち・実行状況" className="rounded px-1 text-xs text-muted-foreground hover:bg-sidebar-accent">Tasks{pendingTasks > 0 && <span className="ml-1 font-bold text-amber-500">承認待ち {pendingTasks}</span>}</Link>
               <div className="relative">
                 <button
                   className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-sidebar-accent"

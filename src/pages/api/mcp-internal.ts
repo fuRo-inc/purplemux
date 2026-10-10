@@ -42,6 +42,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     let data: unknown;
     switch (operation) {
+      case 'run_task_session_turn':
+      case 'finish_task_session':
       case 'propose_task_session':
       case 'get_task_session':
       case 'list_task_sessions':

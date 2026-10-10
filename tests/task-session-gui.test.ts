@@ -75,18 +75,18 @@ beforeEach(async () => {
 afterEach(() => { hooks.reset(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('Task Session detail GUI', () => {
   it.each(['expired', 'revoked'] as const)('polls the selected detail and removes buttons after %s', async (status) => {
-    await select(); expect(button('承認を記録').props.disabled).toBe(false);
+    await select(); expect(button('リスクを確認して承認').props.disabled).toBe(false);
     record = { ...record, status };
     await vi.advanceTimersByTimeAsync(30000); await settle();
     expect(text(tree)).toContain(status === 'expired' ? '申請詳細 — 期限切れ' : '申請詳細 — 取消済み');
-    expect(nodes(tree).some((n) => n.type === 'button' && text(n.props.children) === '承認を記録')).toBe(false);
+    expect(nodes(tree).some((n) => n.type === 'button' && text(n.props.children) === 'リスクを確認して承認')).toBe(false);
     expect(fetchMock.mock.calls.filter((c) => c[0].includes('?id=task-one'))).toHaveLength(2);
   });
   it('refreshes details after POST failure, preserves the error and blocks duplicate clicks', async () => {
     await select();
     let resolve!: (value: Response) => void;
     fetchMock.mockImplementationOnce(() => new Promise<Response>((r) => { resolve = r; }));
-    const click = button('承認を記録').props.onClick!;
+    const click = button('リスクを確認して承認').props.onClick!;
     const first = click(); const second = click();
     record = { ...record, status: 'revoked' };
     resolve(Response.json({ error: 'status changed' }, { status: 409 }));
@@ -120,6 +120,17 @@ describe('Task Session detail GUI', () => {
     fetchMock.mockImplementation(async () => Response.json({ record: { ...record, status: 'expired' }, records: [], audit: [] }));
     await vi.advanceTimersByTimeAsync(30000); await settle();
     expect(text(tree)).toContain('申請詳細 — 期限切れ');
+  });
+  it('removes the input form, displays execution risk and confirms Full Access from the GUI', async () => {
+    record = { ...record, workspaceId: 'ws', tabId: 'tab', requestedPermissions: 'full-access' };
+    await select();
+    expect(nodes(tree).some((node) => node.type === 'form')).toBe(false);
+    expect(text(tree)).toContain('repo外への操作をOSレベルでは防ぎません');
+    expect(text(tree)).toContain('実行権限は未有効');
+    button('リスクを確認して承認').props.onClick?.(); await settle();
+    const post = fetchMock.mock.calls.find((c) => c[1]?.method === 'POST');
+    expect(JSON.parse(post![1].body)).toMatchObject({ action: 'approved', fullAccessWarningAccepted: true });
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('全ファイルにアクセス'));
   });
   it('ignores a late detail response after selecting a different record', async () => {
     let resolve!: (value: Response) => void;
