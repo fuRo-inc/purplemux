@@ -22,7 +22,8 @@ remoteは設定照合のみ。SSHによる実在確認やホストの操作は�
 | approved | revoked / expired |
 | rejected / revoked / expired | なし |
 
-同じ最終判断の再送は同じ記録を返し、監査イベントを増やさない。
+同じ最終判断のstore内再送は同じ記録を返し、監査イベントを増やさない。
+GUI APIは確認時のstatusとの一致を必須とし、既に状態が変わった判断の再送は409で拒否する。
 pending/approvedは管理storeへのアクセス時に期限切れへ移行する。
 バックグラウンド実行やタイマーによる仕事の開始はない。
 APIアクセスがない間のファイル状態は遅延更新となるが、次回の照会・判断では期限を必ず評価する。
@@ -52,16 +53,23 @@ directory作成によるプロセス間ロックで読み取り/期限更新/状
 SidebarのTasksリンクまたは `/task-sessions` から管理画面を開く。
 一覧は100件ごと、詳細には対象範囲・期限・申請元・監査を表示する。
 明示操作後の確認ダイアログから承認・拒否・取消を記録する。
+一覧と表示中の詳細を30秒ごとに再取得し、POST失敗後も詳細を再取得する。
+詳細取得に失敗したときは古い詳細と操作ボタンを非表示にし、定期再取得を続ける。
 
 - `GET /api/task-sessions?offset=0`: 一覧とGUI用CSRFトークン。offsetは0〜5000。
 - `GET /api/task-sessions?id=<taskId>`: 詳細と当該申請の全監査。
 - `GET /api/task-sessions?audit=1`: 最新200件の監査。
 - `POST /api/task-sessions`: 新規申請。
-- `POST /api/task-sessions/<taskId>`: `{ "action": "approved" | "rejected" | "revoked", "confirm": true }`。
+- `POST /api/task-sessions/<taskId>`: `{ "action": "approved" | "rejected" | "revoked", "confirm": true, "expectedStatus": "pending" | "approved" }`。
 
 全GUI APIで既存の有効なlogin Cookie（sub=user）を検証する。
 CLI tokenやMCP bearerのみでは利用不可。変更APIはJSON、同一Origin、session-bound HMAC CSRF header
 `x-task-session-csrf` を要求する。未知のdecisionフィールドも拒否する。
+確認時の `expectedStatus` をstoreのロック内で照合し、期限切れや他画面による変更は409で拒否する。
+Cookie refreshでPOSTが403になった場合はGETでCSRFを再取得し、POSTを自動再送しない。
+利用者は最新状態を確認し、承認・取消などを再度明示操作して確認する。
+新規申請bodyParserは64kb（UTF-8日本語の最大長入力を許容）で、既存schemaの文字数上限は維持する。
+非JSONエラー応答もHTTP statusを含むメッセージを表示する。
 OriginはHostとhttp/httpsを完全照合する。HTTPS ingressはtrusted proxyとして
 `Host` と `X-Forwarded-Proto` を正しく設定し、利用者のforwarded headerを上書きする必要がある。
 APIはno-storeで、予期しない例外内容・stack・保存パスをクライアントへ返さない。

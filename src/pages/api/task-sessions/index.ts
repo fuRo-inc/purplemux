@@ -3,7 +3,7 @@ import { authenticateTaskSessionGui } from '@/lib/task-session-gui-auth';
 import { TaskSessionError, taskSessions } from '@/lib/task-session-store';
 import { z } from 'zod';
 
-export const config = { api: { bodyParser: { sizeLimit: '16kb' } } };
+export const config = { api: { bodyParser: { sizeLimit: '64kb' as const } } };
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');

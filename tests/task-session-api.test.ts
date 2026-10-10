@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { signSessionToken } from '@/lib/auth';
+import { MAX_AGE, signSessionToken } from '@/lib/auth';
 import { taskSessionCsrf } from '@/lib/task-session-gui-auth';
-import { taskSessions } from '@/lib/task-session-store';
-import handler from '@/pages/api/task-sessions/index';
+import { TaskSessionError, taskSessions } from '@/lib/task-session-store';
+import handler, { config } from '@/pages/api/task-sessions/index';
+import { TaskSessionGuiClient } from '@/lib/task-session-gui-client';
+import { proxy } from '@/proxy';
+import { NextRequest } from 'next/server';
+import { SignJWT } from 'jose';
+import { Readable } from 'node:stream';
+import type { IncomingMessage } from 'node:http';
+import { parseBody } from 'next/dist/server/api-utils/node/parse-body';
 import decision from '@/pages/api/task-sessions/[id]';
 import { dispatchTaskSessionMcp } from '@/lib/mcp-task-sessions';
 import { dispatchMcpRequest } from '@/lib/mcp-bridge';
@@ -21,7 +28,7 @@ function req(overrides: Record<string, unknown> = {}) {
   return { method: 'POST', cookies: { 'session-token': token }, headers: {
     origin: 'http://localhost:8022', host: 'localhost:8022', 'content-type': 'application/json',
     'x-task-session-csrf': taskSessionCsrf(token),
-  }, socket: {}, query: { id: crypto.randomUUID() }, body: { action: 'approved', confirm: true }, ...overrides } as unknown as NextApiRequest;
+  }, socket: {}, query: { id: crypto.randomUUID() }, body: { action: 'approved', confirm: true, expectedStatus: 'pending' }, ...overrides } as unknown as NextApiRequest;
 }
 function res() {
   const r = { setHeader: vi.fn(), status: vi.fn(), json: vi.fn() };
@@ -29,7 +36,7 @@ function res() {
   return r as unknown as NextApiResponse & { status: ReturnType<typeof vi.fn>; json: ReturnType<typeof vi.fn> };
 }
 beforeEach(async () => { vi.stubEnv('NEXTAUTH_SECRET', 'isolated-task-session-test-secret'); token = await signSessionToken(); });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe('authenticated GUI management routes', () => {
   it('requires a login cookie even when a CLI or MCP token is supplied', async () => {
@@ -56,7 +63,7 @@ describe('authenticated GUI management routes', () => {
   });
   it('requires explicit confirmation, JSON and known fields', async () => {
     const spy = vi.spyOn(taskSessions, 'decide');
-    for (const body of [{ action: 'approved' }, { action: 'approved', confirm: true, sandboxMode: 'danger-full-access' }]) {
+    for (const body of [{ action: 'approved' }, { action: 'approved', confirm: true }, { action: 'approved', confirm: true, expectedStatus: 'expired' }, { action: 'approved', confirm: true, expectedStatus: 'pending', sandboxMode: 'danger-full-access' }]) {
       const response = res(); await decision(req({ body }), response);
       expect(response.status).toHaveBeenCalledWith(400);
     }
@@ -67,7 +74,14 @@ describe('authenticated GUI management routes', () => {
   it('records a GUI decision only after verification', async () => {
     const spy = vi.spyOn(taskSessions, 'decide').mockResolvedValue({ status: 'approved' } as never);
     const request = req(); const response = res(); await decision(request, response);
-    expect(response.status).toHaveBeenCalledWith(200); expect(spy).toHaveBeenCalledWith(request.query.id, 'approved');
+    expect(response.status).toHaveBeenCalledWith(200); expect(spy).toHaveBeenCalledWith(request.query.id, 'approved', 'pending');
+  });
+  it('returns 409 when the confirmed status no longer matches storage', async () => {
+    const decide = vi.spyOn(taskSessions, 'decide').mockRejectedValue(new TaskSessionError('Task session status changed', 409));
+    const response = res(); const request = req({ body: { action: 'revoked', confirm: true, expectedStatus: 'pending' } });
+    await decision(request, response);
+    expect(decide).toHaveBeenCalledWith(request.query.id, 'revoked', 'pending');
+    expect(response.status).toHaveBeenCalledWith(409);
   });
   it('returns a session-bound CSRF token and no-store list, detail and audit', async () => {
     vi.spyOn(taskSessions, 'list').mockResolvedValue([]);
@@ -78,6 +92,52 @@ describe('authenticated GUI management routes', () => {
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
     const detail = res(); await handler(req({ method: 'GET' }), detail); expect(detail.status).toHaveBeenCalledWith(200);
     const audit = res(); await handler(req({ method: 'GET', query: { audit: '1' } }), audit); expect(audit.json).toHaveBeenCalledWith({ audit: [] });
+  });
+  it.each(['approved', 'revoked'] as const)('recovers from proxy cookie refresh without replaying %s', async (action) => {
+    const now = Math.floor(Date.now() / 1000);
+    token = await new SignJWT({ sub: 'user' }).setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt(now - MAX_AGE / 2 - 60).setExpirationTime(now + MAX_AGE / 2 - 60)
+      .sign(new TextEncoder().encode(process.env.NEXTAUTH_SECRET));
+    const originalCookie = token;
+    vi.spyOn(taskSessions, 'list').mockResolvedValue([]);
+    const decide = vi.spyOn(taskSessions, 'decide').mockResolvedValue({ status: 'approved' } as never);
+    const methods: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options: RequestInit) => {
+      const method = options.method || 'GET'; methods.push(method);
+      const request = req({ method, query: method === 'GET' ? {} : { id: crypto.randomUUID() },
+        body: options.body ? JSON.parse(options.body as string) : undefined });
+      Object.assign(request.headers, options.headers);
+      const refreshed = await proxy(new NextRequest('http://localhost:8022' + url, { headers: { cookie: 'session-token=' + token } }));
+      const response = res();
+      await (method === 'GET' ? handler : decision)(request, response);
+      const cookie = refreshed.headers.get('set-cookie');
+      if (cookie) token = cookie.split(';')[0].slice('session-token='.length);
+      return Response.json(response.json.mock.calls[0][0], { status: response.status.mock.calls[0][0] });
+    }));
+    const onCsrf = vi.fn(); const client = new TaskSessionGuiClient(onCsrf);
+    await client.request('/api/task-sessions');
+    expect(token).not.toBe(originalCookie);
+    expect(onCsrf).toHaveBeenLastCalledWith(taskSessionCsrf(originalCookie));
+    const body = { action, confirm: true, expectedStatus: 'pending' };
+    await expect(client.request('/api/task-sessions/test', body)).rejects.toThrow('自動再送していません');
+    expect(methods).toEqual(['GET', 'POST', 'GET']);
+    expect(decide).not.toHaveBeenCalled();
+    expect(onCsrf).toHaveBeenLastCalledWith(taskSessionCsrf(token));
+    await client.request('/api/task-sessions/test', body); // A new explicit user action.
+    expect(decide).toHaveBeenCalledTimes(1);
+  });
+  it('parses maximum-length Japanese input within 64kb and keeps the parser bounded', async () => {
+    const body = { purpose: '目'.repeat(2000), scope: '範'.repeat(2000), workdir: '/' + '道'.repeat(4095),
+      hostId: 'local', expiresAt: new Date(Date.now() + 3600000).toISOString(), idempotencyKey: 'japanese' };
+    const raw = JSON.stringify(body);
+    expect(Buffer.byteLength(raw)).toBeGreaterThan(16 * 1024);
+    const incoming = (value: string) => Object.assign(Readable.from([Buffer.from(value)]), {
+      headers: { 'content-type': 'application/json' },
+    }) as IncomingMessage;
+    expect(config.api.bodyParser.sizeLimit).toBe('64kb');
+    expect(await parseBody(incoming(raw), config.api.bodyParser.sizeLimit)).toEqual(body);
+    await expect(parseBody(incoming(JSON.stringify({ purpose: '目'.repeat(24000) })), config.api.bodyParser.sizeLimit))
+      .rejects.toMatchObject({ statusCode: 413 });
   });
   it('does not disclose unexpected exceptions', async () => {
     vi.spyOn(taskSessions, 'list').mockRejectedValue(new Error('password=DO_NOT_DISCLOSE'));

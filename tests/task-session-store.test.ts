@@ -102,6 +102,30 @@ describe('Task Session management store', () => {
     await expect(store.decide(record.id, 'approved')).rejects.toThrow('transition');
     expect((await store.detail(record.id)).audit.map((e) => e.event)).toEqual(['pending', 'approved', 'revoked']);
   });
+  it('rejects stale GUI status under the transaction lock, including duplicate decisions', async () => {
+    const record = await store.propose(input(), 'gui');
+    await store.decide(record.id, 'approved', 'pending');
+    await expect(store.decide(record.id, 'revoked', 'pending')).rejects.toMatchObject({ status: 409 });
+    await expect(store.decide(record.id, 'approved', 'pending')).rejects.toMatchObject({ status: 409 });
+    expect((await store.detail(record.id)).record.status).toBe('approved');
+    await store.decide(record.id, 'revoked', 'approved');
+    await expect(store.decide(record.id, 'revoked', 'approved')).rejects.toMatchObject({ status: 409 });
+    expect((await store.detail(record.id)).audit.map((e) => e.event)).toEqual(['pending', 'approved', 'revoked']);
+  });
+  it('rejects stale GUI confirmation after expiry', async () => {
+    const record = await store.propose(input(), 'gui');
+    now += 3600000;
+    await expect(store.decide(record.id, 'approved', 'pending')).rejects.toMatchObject({ status: 409 });
+    expect((await store.detail(record.id)).record.status).toBe('expired');
+  });
+  it('accepts maximum-length Japanese fields but retains schema length limits', async () => {
+    const fields = { purpose: '目'.repeat(2000), scope: '範'.repeat(2000), workdir: '/' + '道'.repeat(4095) };
+    expect(await store.propose({ ...input(), ...fields }, 'gui')).toMatchObject(fields);
+    for (const field of ['purpose', 'scope', 'workdir'] as const) {
+      await expect(store.propose({ ...input('long-' + field), ...fields, [field]: fields[field] + '字' }, 'gui'))
+        .rejects.toThrow('Invalid task session input');
+    }
+  });
   it('allows exactly one outcome in an approve/reject race', async () => {
     const record = await store.propose(input(), 'gui');
     const outcomes = await Promise.allSettled([store.decide(record.id, 'approved'), store.decide(record.id, 'rejected')]);

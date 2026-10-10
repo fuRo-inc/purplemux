@@ -161,13 +161,17 @@ export class TaskSessionStore {
   }
   async audit() { return this.transaction(async (s) => s.audit.slice(-200).reverse()); }
   /** Only the authenticated GUI route calls this method; no MCP dispatch path exists. */
-  async decide(taskId: unknown, action: unknown) {
-    if (!z.uuid().safeParse(taskId).success || !['approved', 'rejected', 'revoked'].includes(String(action))) {
+  async decide(taskId: unknown, action: unknown, expectedStatus?: 'pending' | 'approved') {
+    if (!z.uuid().safeParse(taskId).success || !['approved', 'rejected', 'revoked'].includes(String(action)) ||
+        (expectedStatus !== undefined && !['pending', 'approved'].includes(expectedStatus))) {
       throw new TaskSessionError('Invalid decision');
     }
     return this.transaction(async (s) => {
       const record = s.records.find((r) => r.id === taskId);
       if (!record) throw new TaskSessionError('Task session not found', 404);
+      if (expectedStatus !== undefined && record.status !== expectedStatus) {
+        throw new TaskSessionError('Task session status changed; refresh and confirm again', 409);
+      }
       if (record.status === action) return record;
       const allowed = record.status === 'pending' ? ['approved', 'rejected', 'revoked'] : record.status === 'approved' ? ['revoked'] : [];
       if (!allowed.includes(String(action))) throw new TaskSessionError('Task session cannot make this transition', 409);

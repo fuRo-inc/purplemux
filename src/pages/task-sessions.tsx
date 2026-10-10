@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { nanoid } from 'nanoid';
 import Head from 'next/head';
 import Link from 'next/link';
 import type { GetServerSideProps } from 'next';
 import { requireAuth } from '@/lib/require-auth';
+import { TaskSessionGuiClient } from '@/lib/task-session-gui-client';
 import type { TaskSession, TaskSessionAudit } from '@/types/task-session';
 
 const labels = { pending: '承認待ち', approved: '承認済み', rejected: '拒否', revoked: '取消済み', expired: '期限切れ' };
@@ -13,23 +14,20 @@ export default function TaskSessionsPage() {
   const [selected, setSelected] = useState<{ record: TaskSession; audit: TaskSessionAudit[] } | null>(null);
   const [audit, setAudit] = useState<TaskSessionAudit[]>([]);
   const [csrf, setCsrf] = useState('');
+  const [client] = useState(() => new TaskSessionGuiClient(setCsrf));
+  const [selectedId, setSelectedId] = useState('');
+  const currentId = useRef('');
+  const detailVersion = useRef(0);
+  const mutationBusy = useRef(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ purpose: '', hostId: 'local', workdir: '', scope: '', expiresAt: '', idempotencyKey: '' });
 
-  async function request(url: string, body?: unknown) {
-    const response = await fetch(url, { cache: 'no-store', ...(body === undefined ? {} : {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-task-session-csrf': csrf }, body: JSON.stringify(body),
-    }) });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '操作に失敗しました');
-    return data;
-  }
   async function refresh(pageOffset = offset) {
-    const data = await request('/api/task-sessions?offset=' + pageOffset);
+    const data = await client.request<{ records: TaskSession[] }>('/api/task-sessions?offset=' + pageOffset);
     setOffset(pageOffset);
-    setRecords(data.records); setCsrf(data.csrfToken);
-    const events = await request('/api/task-sessions?audit=1'); setAudit(events.audit);
+    setRecords(data.records);
+    const events = await client.request<{ audit: TaskSessionAudit[] }>('/api/task-sessions?audit=1'); setAudit(events.audit);
   }
   useEffect(() => {
     setForm((f) => ({ ...f, expiresAt: new Date(Date.now() + 3600000).toISOString(), idempotencyKey: nanoid() }));
@@ -45,21 +43,48 @@ export default function TaskSessionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offset]);
 
-  async function detail(id: string) {
+  const loadDetail = useCallback(async (id: string) => {
+    if (currentId.current !== id) return;
+    const version = ++detailVersion.current;
+    try {
+      const data = await client.request<{ record: TaskSession; audit: TaskSessionAudit[] }>('/api/task-sessions?id=' + encodeURIComponent(id));
+      if (currentId.current === id && detailVersion.current === version) setSelected(data);
+    } catch (e) {
+      if (currentId.current === id && detailVersion.current === version) {
+        setSelected(null); // Never leave actionable stale details after a failed read.
+        setError(e instanceof Error ? e.message : '照会に失敗しました');
+      }
+    }
+  }, [client]);
+  useEffect(() => {
+    if (!selectedId) return;
+    const versionRef = detailVersion;
+    void loadDetail(selectedId);
+    const timer = setInterval(() => { void loadDetail(selectedId); }, 30000);
+    return () => { clearInterval(timer); versionRef.current++; };
+  }, [selectedId, loadDetail]);
+
+  function detail(id: string) {
     setError('');
-    try { setSelected(await request('/api/task-sessions?id=' + encodeURIComponent(id))); }
-    catch (e) { setError(e instanceof Error ? e.message : '照会に失敗しました'); }
+    currentId.current = id;
+    detailVersion.current++;
+    setSelected(null);
+    if (selectedId === id) void loadDetail(id);
+    else setSelectedId(id);
   }
   async function decide(action: 'approved' | 'rejected' | 'revoked') {
-    if (!selected || busy) return;
+    if (!selected || mutationBusy.current) return;
     const record = selected.record;
     if (!window.confirm(`${labels[action]}を記録しますか？\n${record.purpose}\n${record.hostId}: ${record.workdir}\n期限: ${record.expiresAt}\n承認記録のみ、実行権限は未連携`)) return;
-    setBusy(true); setError('');
+    mutationBusy.current = true; setBusy(true); setError('');
     try {
-      await request('/api/task-sessions/' + record.id, { action, confirm: true });
-      await refresh(); await detail(record.id);
+      await client.request('/api/task-sessions/' + record.id, { action, confirm: true, expectedStatus: record.status });
+      await refresh();
     } catch (e) { setError(e instanceof Error ? e.message : '操作に失敗しました'); }
-    finally { setBusy(false); }
+    finally {
+      await loadDetail(record.id);
+      mutationBusy.current = false; setBusy(false);
+    }
   }
   return <main className="mx-auto max-w-4xl space-y-6 p-6">
     <Head><title>Task Sessions — Purplemux</title></Head>
@@ -69,13 +94,16 @@ export default function TaskSessionsPage() {
     <p>秘密・認証情報は入力しないでください。Host IDとworkdirは既存Workspaceの値を指定してください。期限は24時間以内です。</p>
     {error && <p role="alert" className="text-red-500">{error}</p>}
     <form className="grid gap-3 rounded border p-4" onSubmit={async (e) => {
-      e.preventDefault(); if (busy) return; setBusy(true); setError('');
+      e.preventDefault(); if (mutationBusy.current) return; mutationBusy.current = true; setBusy(true); setError('');
       try {
-        const record = await request('/api/task-sessions', form);
+        const record = await client.request<TaskSession>('/api/task-sessions', form);
         setForm((f) => ({ ...f, idempotencyKey: nanoid() }));
-        await refresh(); await detail(record.id);
+        await refresh(); detail(record.id);
       } catch (err) { setError(err instanceof Error ? err.message : '申請に失敗しました'); }
-      finally { setBusy(false); }
+      finally {
+        if (currentId.current) await loadDetail(currentId.current);
+        mutationBusy.current = false; setBusy(false);
+      }
     }}>
       <h2 className="font-bold">新規申請</h2>
       {(['purpose', 'hostId', 'workdir', 'scope', 'expiresAt'] as const).map((field) => <label key={field} className="grid gap-1">
@@ -104,10 +132,10 @@ export default function TaskSessionsPage() {
       </dl>
       <div className="flex gap-3">
         {selected.record.status === 'pending' && <>
-          <button className="rounded border p-2" disabled={busy} onClick={() => void decide('approved')}>承認を記録</button>
-          <button className="rounded border p-2" disabled={busy} onClick={() => void decide('rejected')}>拒否</button>
+          <button className="rounded border p-2" disabled={busy || !csrf} onClick={() => void decide('approved')}>承認を記録</button>
+          <button className="rounded border p-2" disabled={busy || !csrf} onClick={() => void decide('rejected')}>拒否</button>
         </>}
-        {['pending', 'approved'].includes(selected.record.status) && <button className="rounded border p-2" disabled={busy} onClick={() => void decide('revoked')}>取消</button>}
+        {['pending', 'approved'].includes(selected.record.status) && <button className="rounded border p-2" disabled={busy || !csrf} onClick={() => void decide('revoked')}>取消</button>}
       </div>
       <h3 className="font-bold">この申請の監査イベント</h3>
       <ul>{selected.audit.map((e) => <li key={e.id}>{e.at} — {labels[e.event]} — {e.actor}</li>)}</ul>
