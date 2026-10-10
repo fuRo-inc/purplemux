@@ -71,10 +71,22 @@ describe('authenticated GUI management routes', () => {
     const response = res(); await decision(request, response); expect(response.status).toHaveBeenCalledWith(415);
     expect(spy).not.toHaveBeenCalled();
   });
+  it('rejects malformed task IDs without exposing a storage error', async () => {
+    const response = res(); await decision(req({ query: { id: 'invalid' } }), response);
+    expect(response.status).toHaveBeenCalledWith(400);
+  });
   it('records a GUI decision only after verification', async () => {
     const spy = vi.spyOn(taskSessions, 'decide').mockResolvedValue({ status: 'approved' } as never);
     const request = req(); const response = res(); await decision(request, response);
     expect(response.status).toHaveBeenCalledWith(200); expect(spy).toHaveBeenCalledWith(request.query.id, 'approved', 'pending');
+  });
+  it('passes Full Access warning proof only after Cookie, CSRF and Origin verification', async () => {
+    const spy = vi.spyOn(taskSessions, 'decide').mockResolvedValue({ status: 'approved' } as never);
+    const request = req({ body: { action: 'approved', confirm: true, expectedStatus: 'pending', fullAccessWarningAccepted: true } });
+    const response = res(); await decision(request, response);
+    expect(spy).toHaveBeenCalledWith(request.query.id, 'approved', 'pending', true);
+    const denied = res(); await decision(req({ ...request, cookies: {} }), denied);
+    expect(denied.status).toHaveBeenCalledWith(401); expect(spy).toHaveBeenCalledTimes(1);
   });
   it('returns 409 when the confirmed status no longer matches storage', async () => {
     const decide = vi.spyOn(taskSessions, 'decide').mockRejectedValue(new TaskSessionError('Task session status changed', 409));
@@ -88,7 +100,7 @@ describe('authenticated GUI management routes', () => {
     vi.spyOn(taskSessions, 'audit').mockResolvedValue([]);
     vi.spyOn(taskSessions, 'detail').mockResolvedValue({ record: {} as never, audit: [] });
     const response = res(); await handler(req({ method: 'GET', query: {} }), response);
-    expect(response.json).toHaveBeenCalledWith({ records: [], csrfToken: taskSessionCsrf(token), executionLinked: false });
+    expect(response.json).toHaveBeenCalledWith({ records: [], csrfToken: taskSessionCsrf(token), executionLinked: true, fullAccessEnabled: false });
     expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
     const detail = res(); await handler(req({ method: 'GET' }), detail); expect(detail.status).toHaveBeenCalledWith(200);
     const audit = res(); await handler(req({ method: 'GET', query: { audit: '1' } }), audit); expect(audit.json).toHaveBeenCalledWith({ audit: [] });
@@ -100,6 +112,7 @@ describe('authenticated GUI management routes', () => {
       .sign(new TextEncoder().encode(process.env.NEXTAUTH_SECRET));
     const originalCookie = token;
     vi.spyOn(taskSessions, 'list').mockResolvedValue([]);
+    vi.spyOn(taskSessions, 'detail').mockResolvedValue({ record: {} as never, audit: [] });
     const decide = vi.spyOn(taskSessions, 'decide').mockResolvedValue({ status: 'approved' } as never);
     const methods: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, options: RequestInit) => {
@@ -190,7 +203,7 @@ describe('private MCP runtime route', () => {
   });
   it('records proposals as MCP without starting Codex', async () => {
     const propose = vi.spyOn(taskSessions, 'propose').mockResolvedValue({ status: 'pending' } as never);
-    const args = { purpose: 'test', hostId: 'local', workdir: '/tmp/test', scope: 'API only',
+    const args = { workspaceId: 'ws', tabId: 'tab', requestedPermissions: 'full-access', purpose: 'test', hostId: 'local', workdir: '/tmp/test', scope: 'API only',
       expiresAt: new Date(Date.now() + 3600000).toISOString(), idempotencyKey: 'key' };
     const response = res(); await internalHandler(internal({ body: { operation: 'propose_task_session', args } }), response);
     expect(propose).toHaveBeenCalledWith(args, 'mcp'); expect(response.status).toHaveBeenCalledWith(200);

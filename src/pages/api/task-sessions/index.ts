@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse, PageConfig } from 'next';
 import { authenticateTaskSessionGui } from '@/lib/task-session-gui-auth';
-import { TaskSessionError, taskSessions } from '@/lib/task-session-store';
+import { TaskSessionError, taskSessions, fullAccessEnabled } from '@/lib/task-session-store';
 import { z } from 'zod';
 
 export const config = { api: { bodyParser: { sizeLimit: '64kb' } } } satisfies PageConfig;
@@ -10,11 +10,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const csrfToken = await authenticateTaskSessionGui(req);
     if (req.method === 'GET') {
+      if (req.query.summary === '1') return res.status(200).json({ pendingCount: await taskSessions.pendingCount() });
       if (req.query.id !== undefined) return res.status(200).json(await taskSessions.detail(req.query.id));
       if (req.query.audit === '1') return res.status(200).json({ audit: await taskSessions.audit() });
       const offset = z.string().regex(/^\d{1,4}$/).optional().safeParse(req.query.offset);
       if (!offset.success) throw new TaskSessionError('Invalid list offset');
-      return res.status(200).json({ records: await taskSessions.list(Number(offset.data ?? 0)), csrfToken, executionLinked: false });
+      return res.status(200).json({ records: await taskSessions.list(Number(offset.data ?? 0)), csrfToken, executionLinked: true, fullAccessEnabled: fullAccessEnabled() });
     }
     if (req.method === 'POST') return res.status(201).json(await taskSessions.propose(req.body, 'gui'));
     res.setHeader('Allow', 'GET, POST');

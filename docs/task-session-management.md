@@ -1,135 +1,63 @@
-# Task Session 管理基盤
+# GUI-approved Task Session execution
 
-この実装は申請・承認記録・拒否・取消・期限切れ・監査のみを扱う。
-UIには「承認記録のみ、実行権限は未連携」と表示する。
-`sessionId` は承認記録の識別子であり、トークンや実行権限ではない。
-Codex実行経路、sandbox/approval policy、既存MCP実行ツールの条件は変更していない。
-Task Session storeはCodex/PTY/SSH実行APIを呼び出さない。
+An authenticated ChatGPT MCP client proposes a development task. The logged-in Purplemux user reviews its purpose, scope, Host, cwd, workspace/tab, Full Access warning and expiry, then approves or rejects it in `/task-sessions`. The normal UI has no manual proposal form. Sidebar Tasks shows a pending count, refreshed every 30 seconds. Session state, bounded turn metadata and audit history appear on the Tasks page, also polled every 30 seconds.
 
-## データと状態
+## MCP workflow
 
-入力は `purpose`, `hostId`, `workdir`, `scope`, `expiresAt`, `idempotencyKey` のみ。
-目的・scopeは空白を除いて1〜2000文字、ID/keyは英数字・ハイフン・アンダースコアで1〜120文字。
-workdirは制御文字のない正規化されたPOSIX絶対パス（最大4096文字）。
-expiresAtはタイムゾーン付きISO 8601で、申請時から最大24時間。
-Host/cwdは既存 `.purplemux/hosts.json` と `workspaces.json` を読み取り、同じhostの既存Workspaceのdirectoryと完全一致することを要求する。
-localはdirectoryの存在も確認し、承認直前に再検証する。
-remoteは設定照合のみ。SSHによる実在確認やホストの操作はしない。
+1. Use `list_workspaces` / `list_codex_tabs` to choose a registered Codex Chat tab and exact target.
+2. Call `propose_task_session` with `purpose`, `scope`, `hostId`, `workdir`, `workspaceId`, `tabId`, `requestedPermissions: "full-access"`, `ttl` (seconds, 1–86400) **or** `expiresAt`, and `idempotencyKey`.
+3. Wait for authenticated GUI approval. There is no MCP approval tool. `confirmFullAccess`, approval/source/status fields and other unknown proposal/turn fields are rejected.
+4. Call `run_task_session_turn` with `taskId`, the same `hostId`, `workdir`, `workspaceId`, `tabId`, `instruction` (1–16000 characters), and a unique `idempotencyKey`. A durable reservation is saved before asynchronous Codex setup. Retry the identical request with the same key; it never injects another turn.
+5. Poll `get_task_session`. `status: approved` plus `executionState: idle` means another turn may run. Reuse the target, with a new instruction and key for fixes/retraining/etc. The first turn gets a dedicated new thread; further turns pin that thread. Normal work within the approved development task continues without repeated permission requests.
+6. `get_task_session(includeOutput: true)` optionally reads the last live assistant result, capped at 6000 characters, from the pinned idle leased thread. It never starts Codex, includes no command stdout/history from earlier turns, and persists no output. It returns null after lease release/restart or when the exact result is unavailable. Normal record queries include only hashes and execution metadata.
+7. Use `finish_task_session` to finish, or `finish_task_session(revoke: true)` to cancel. GUI users can also finish or stop/revoke. Neither operation grants permissions. `list_task_sessions` provides pages of 100 records.
 
-| 現在 | 可能な遷移 |
-| --- | --- |
-| pending | approved / rejected / revoked / expired |
-| approved | revoked / expired |
-| rejected / revoked / expired | なし |
+Existing `start_codex_task` read-only/workspace-write behavior and PR1 per-turn permission restoration remain supported. Its target/write confirmation requirements are unchanged.
 
-同じ最終判断のstore内再送は同じ記録を返し、監査イベントを増やさない。
-GUI APIは確認時のstatusとの一致を必須とし、既に状態が変わった判断の再送は409で拒否する。
-pending/approvedは管理storeへのアクセス時に期限切れへ移行する。
-バックグラウンド実行やタイマーによる仕事の開始はない。
-APIアクセスがない間のファイル状態は遅延更新となるが、次回の照会・判断では期限を必ず評価する。
+## Execution authority
 
-## 永続化・競合
+Full Access execution defaults OFF. Both administrator environment opt-ins must be set in the Next runtime:
 
-保存先: `~/.purplemux/task-sessions/records.json`（0600）。新規directoryは0700。
-version=1のファイルに申請、監査、source別idempotency keyのSHA-256対応表をまとめて保存する。
-監査はtaskId、状態イベント、actor（mcp / gui:user / system）、日時のみ。入力本文や認証情報を監査に複製しない。
-原子的renameとファイル・directoryのfsyncを使用する。
-申請の追加と監査イベントが異なるファイルに分かれることはない。
-JSON破損・schema不整合・シンボリックリンクのrecords.jsonは保存を拒否し、空の状態で上書きしない。
-
-directory作成によるプロセス間ロックで読み取り/期限更新/状態判断/保存を直列化する。
-5秒以内にロックを取得できなければ503で失敗し、再送を求める。
-所有者の停止を安全に判断できないため、古いロックを自動で奪わない。
-クラッシュでlockが残った場合は、全store利用プロセスの停止確認後に管理者によるlockの除去が必要。
-ローカルファイルシステム向けであり、複数サーバー・NFS共有・耐改ざん監査にはDB等の設計が必要。
-
-同じsource/key・同じ本文の再送は元の記録（失効後も含む）を返す。
-同じkeyで本文を変えると409。本文全体が同じactive申請は別keyでも重複生成しない。
-上限は申請5000件、key対応10000件。上限到達で新規申請を拒否し、監査を削除しない。
-現在は削除・自動アーカイブ・監査署名はない。
-
-## GUI/API
-
-SidebarのTasksリンクまたは `/task-sessions` から管理画面を開く。
-一覧は100件ごと、詳細には対象範囲・期限・申請元・監査を表示する。
-明示操作後の確認ダイアログから承認・拒否・取消を記録する。
-一覧と表示中の詳細を30秒ごとに再取得し、POST失敗後も詳細を再取得する。
-詳細取得に失敗したときは古い詳細と操作ボタンを非表示にし、定期再取得を続ける。
-
-- `GET /api/task-sessions?offset=0`: 一覧とGUI用CSRFトークン。offsetは0〜5000。
-- `GET /api/task-sessions?id=<taskId>`: 詳細と当該申請の全監査。
-- `GET /api/task-sessions?audit=1`: 最新200件の監査。
-- `POST /api/task-sessions`: 新規申請。
-- `POST /api/task-sessions/<taskId>`: `{ "action": "approved" | "rejected" | "revoked", "confirm": true, "expectedStatus": "pending" | "approved" }`。
-
-全GUI APIで既存の有効なlogin Cookie（sub=user）を検証する。
-CLI tokenやMCP bearerのみでは利用不可。変更APIはJSON、同一Origin、session-bound HMAC CSRF header
-`x-task-session-csrf` を要求する。未知のdecisionフィールドも拒否する。
-確認時の `expectedStatus` をstoreのロック内で照合し、期限切れや他画面による変更は409で拒否する。
-Cookie refreshでPOSTが403になった場合はGETでCSRFを再取得し、POSTを自動再送しない。
-利用者は最新状態を確認し、承認・取消などを再度明示操作して確認する。
-新規申請bodyParserは64kb（UTF-8日本語の最大長入力を許容）で、既存schemaの文字数上限は維持する。
-非JSONエラー応答もHTTP statusを含むメッセージを表示する。
-OriginはHostとhttp/httpsを完全照合する。HTTPS ingressはtrusted proxyとして
-`Host` と `X-Forwarded-Proto` を正しく設定し、利用者のforwarded headerを上書きする必要がある。
-APIはno-storeで、予期しない例外内容・stack・保存パスをクライアントへ返さない。
-現在のPurplemuxは単一ログインユーザーを前提とし、複数ユーザーの所有権/RBACは未実装。
-
-## MCP
-
-既存の認証済みloopback MCP → private runtime RPCに次の管理専用操作を追加。
-既存Codex write opt-inが無効でも申請・照会できるが、実行は開始しない。
-
-- `propose_task_session`: 検証済み入力をpendingとして記録。
-- `get_task_session`: taskIdで記録と監査を照会。
-- `list_task_sessions`: offset（任意）で100件ごとの記録を照会。
-
-MCPのapproval/rejection/revocation操作は存在しない。
-`approved`, `confirmApproval`, `status`, `source`, `sessionId`, `sandboxMode` 等の申請フィールドは拒否する。
-申請元はサーバーで固定し、GUIのlogin/CSRFトークンをMCPへ公開しない。
-GUIの操作境界を認証で分離しているが、login Cookieを持つ利用者の操作が人間のクリックであることを
-HTTPレベルで証明する仕組みではない。
-
-## 情報取り扱い
-
-purpose/scopeは平文保存され、GUIと認証済みMCPから照会できる。秘密は入力しない。
-代表的なprivate key、Bearer、API key/token/password代入パターンを入力で拒否するが、任意の秘密を
-完全検知できるものではない。監査本文は最小化し、拒否入力をログに書かない。
-MCPの既存private bearerが漏洩した場合の照会制限やユーザー別所有権は、既存認証モデルの課題として残る。
-承認によるHost/cwdの固定は記録時点の照合であり、将来の実行先の安全性を保証するものではない。
-
-## 開発基点と引き渡し
-
-独立clone: `/home/wataru/wataru_ws/purplemux-task-sessions`。
-ローカル実装ブランチ: `feat/mcp-task-session-full-access`。
-利用可能なローカル基点: `682025e7d82354d5a6d0b73f2f3f4e55cae258ee`。
-指定された `d5c83b8b74fd5272af0acad13d0f39e5e944980e` はローカルの両repoにobjectがなく、
-GitHubの既存ブランチとのbase整合は未確認。ネットワーク取得・push・本番サービス操作はしていない。
-clone元および別repoは編集していない。依存パッケージは独立clone内へコピーして使用する。
-
-最終commitの変更だけを通常端末からGitHubの既存ブランチへcherry-pickし、基点を確認してテスト後にpushする。
-本cloneの履歴を既存GitHubブランチへforce pushしない。
-独立した新しいcheckoutでの手順例（`<commit>`は最終報告のcommit hash）:
-
-```sh
-git fetch origin
-git switch -c task-session-review origin/feat/mcp-task-session-full-access
-git merge-base --is-ancestor d5c83b8b74fd5272af0acad13d0f39e5e944980e HEAD
-git fetch /home/wataru/wataru_ws/purplemux-task-sessions feat/mcp-task-session-full-access
-git cherry-pick <commit>
-pnpm exec tsc --noEmit --incremental false
-pnpm test
-git push origin HEAD:feat/mcp-task-session-full-access
+```
+PURPLEMUX_MCP_ALLOW_WRITES=1
+PURPLEMUX_MCP_ALLOW_FULL_ACCESS=1
 ```
 
-基点チェック失敗やcherry-pick競合時には既存ブランチの内容を確認・解消してから進める。
-他のマシンへ引き渡す場合は `git format-patch -1 --stdout <commit>` を移送して適用できる。
-各commitメッセージ末尾に `[skip ci]` を付ける。
+Proposal and GUI approval are permitted with these flags OFF, but execution is rejected; the GUI displays 「実行権限は未有効」. No MCP argument substitutes for either administrator opt-in or GUI approval.
 
-## 検証
+GUI mutations require the existing login Cookie (sub=user), JSON, exact same Origin and session-bound HMAC CSRF header. MCP/CLI bearer authentication cannot call the decision route. The GUI sends warning confirmation only after displaying the Full Access risk and a user confirmation dialog. This authenticates a logged-in user's HTTP action; HTTP cannot prove a physical human click. Purplemux's existing single-user login model remains the trust boundary.
 
-`pnpm exec tsc --noEmit --incremental false`、対象Vitestと全Vitestを実行する。
-新規境界テストは不正入力、Host/cwd、TTL、期限切れ、重複、並列store/別プロセス、
-approve/reject競合、保存失敗、破損、symlink、unauth、Origin/CSRF、MCP自己承認拒否を扱う。
-`tests/setup.ts` の共通logger mockで、既存unit testがユーザーのproductionログを開くことも防ぐ。
-本番server・GUIブラウザーの起動検証は行っていない。
+Approval is bound to purpose/scope and the registered Host/cwd/workspace/tab, with a TTL of at most 24 hours. The store checks approval, warning acknowledgement, target, registration, opt-ins and expiry on every reservation and immediately before each turn. Records from PR2 lacking workspace/tab/permissions/warning acknowledgement remain readable but never execute; they require a fresh proposal and GUI review.
+
+The runtime's session lease saves GUI permissions, pins the thread and expires automatically. While leased, manual GUI submission, settings, thread changes and legacy MCP tasks are blocked. Existing GUI Codex approval choices (including acceptForSession) remain available. Successful `turn/completed` sets busy=false while retaining the lease. Before each `turn/start`, `thread/settings/update` must confirm effective `sandboxPolicy.type=dangerFullAccess` and `approvalPolicy=never`. Unsupported, missing or inconsistent confirmation fails closed; CLI versions must support this response shape.
+
+Finish/revoke invalidates durable authority before releasing runtime permissions. An active turn receives an interrupt; if it has not completed when acknowledged, the app-server connection is terminated instead of restoring permissions during an uncertain running turn. Idle release restores settings by acknowledged RPC. Expiry interrupts an identifiable active turn with a bounded 5-second request, then disconnects; uncertain setup disconnects immediately. Failed/interrupted/unknown turns, failed RPC/setup/restoration, process exit and storage errors revoke execution. Restart makes previously owned idle/running sessions revoked/unknown. Resuming requires a fresh GUI-approved proposal. Codex child processes also omit `__NEXT_PRIVATE_STANDALONE_CONFIG` so their development builds do not inherit Purplemux's standalone Next configuration. Saved GUI settings never acquire the session's Full Access values; the existing deliberate GUI permissions are preserved.
+
+## Durability and concurrency
+
+The version=1 atomic JSON remains backward compatible with PR2 records. Optional fields add target, warning acknowledgement, execution state, process ownership, pinned thread and turn metadata. Approval status is separate from `idle/running/unknown/complete` execution state. A stable process identifier and runtime lease map are shared across Next API bundles. Restart changes the process identifier; old execution authority is not reused.
+
+`~/.purplemux/task-sessions/records.json` uses private permissions, file and directory fsync, atomic rename and the existing filesystem directory lock. Proposal and turn keys are SHA-256 hashes. Reservations serialize across writers. Same-key/same-input retries return the existing turn; conflicting inputs fail. A running turn blocks another turn, and an idle owned session excludes another session from the same tab. The runtime separately enforces exclusive ownership against browser/legacy activity. No automatic retry executes an uncertain turn.
+
+Audit events record actor, time, instruction hash, reservation/Codex turn IDs, thread ID and result. Raw turn instructions, command stdout, final assistant output and arbitrary exception messages are not saved. `instructionPreview` is an explicit omission marker to avoid persisting secrets. Purpose/scope are still plain text; common credential patterns are rejected but arbitrary secrets cannot be detected perfectly. Do not place secrets there.
+
+Limits: 5000 records, 10000 proposal keys, 25000 audit events, 1000 turns/session; new turns stop before audit capacity is exhausted. No automatic archival/deletion. Corrupt/schema-invalid JSON and symlinked storage fail closed. A crash during a filesystem transaction may leave the existing lock directory. It is never stolen automatically: an administrator must first confirm all store writers are stopped before removing a stale lock. This is local filesystem storage, not a multi-server/NFS database or tamper-proof audit log.
+
+## Technical boundaries and handoff
+
+`danger-full-access` can access files and commands throughout the selected host's Linux user account. Host/cwd/scope checks bind the execution target and instructions; they do **not** enforce an OS boundary around the repo or prevent other devices from being contacted by commands. Each instruction includes purpose/scope/target and an explicit prohibition on unrelated deletion or substantial operations on other devices. The GUI states these limits before approval. Interrupting/killing the app-server is best effort; detached commands, SSH descendants or commands already completed cannot be undone or guaranteed terminated by this mechanism.
+
+Implementation/tests run only in `/home/wataru/wataru_ws/purplemux-task-runtime`, branch `feat/mcp-task-session-execution`, based on `0640fd100791ce09b0c1f73a49956cb3c3fbf6a2`. No push, CI, production settings/service operations, real Codex execution or GPU/training commands are performed. Runtime tests use mocks and temporary test stores. Before deployment, manually verify the actual Codex settings response, browser workflow, restart/interrupt behavior and build in a normal terminal. This checkout is a reviewable development artifact, not a production installation.
+
+## Local validation results
+
+| Check | Result |
+| --- | --- |
+| `tsc --noEmit --incremental false` | Passed |
+| `eslint` | Passed, 0 errors / 5 existing warnings |
+| `vitest run` | 30 files / 295 tests passed (253 prior tests retained, 42 added) |
+| `npm run build:server` | Passed (`tsup` server bundle) |
+| `npm run build` with inherited standalone config removed | TypeScript passed; default Turbopack remained in optimization without progress for several minutes; this development build process was interrupted |
+| `next build --webpack`, both inherited standalone config and `TURBOPACK` removed | TypeScript and compilation passed; page-data collection failed (`/tools-required` on one attempt, `/login` on the final attempt). Full Next build remains unverified |
+
+No escalation, CI, push, service restart/stop, real Codex or GPU commands were used. Full production build, actual Codex effective-settings response, browser approval/continuation and process/SSH interruption require a separate human verification in a normal environment. The page-data failure's underlying cause has not been established; it is not claimed to be a compiler error or a confirmed bind EPERM.

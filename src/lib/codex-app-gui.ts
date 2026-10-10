@@ -81,6 +81,7 @@ export type CodexGuiState = {
   approvalPolicy: CodexGuiApprovalPolicy;
   fastMode: boolean;
   taskPermissionsActive?: boolean;
+  taskSessionId?: string;
   models: CodexGuiModel[];
   items: CodexGuiItem[];
   approvals: CodexGuiApproval[];
@@ -112,6 +113,10 @@ export class CodexGuiRuntime {
   private actions: Promise<unknown> = Promise.resolve();
   private taskTurnId: string | null = null;
   private earlyTaskCompletions = new Map<string, Json>();
+  private sessionLease: {
+    sessionId: string; expiresAt: string; threadId: string | null;
+    validate: () => Promise<void>; onLost: () => void; timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   private temporaryPermissions: { sandboxMode: CodexGuiSandbox; approvalPolicy: CodexGuiApprovalPolicy } | null = null;
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.actions.catch(() => {}).then(operation);
@@ -146,6 +151,7 @@ export class CodexGuiRuntime {
       items: this.state.items.map((item) => ({ ...item })),
       approvals: structuredClone(this.state.approvals),
       taskPermissionsActive: this.temporaryPermissions !== null,
+      ...(this.sessionLease ? { taskSessionId: this.sessionLease.sessionId } : {}),
     };
   }
 
@@ -274,7 +280,9 @@ export class CodexGuiRuntime {
         this.state.error = asString(asRecord(turn.error).message) || 'Codex turn failed';
       }
       this.state.approvals = [];
-      if (this.temporaryPermissions) {
+      if (this.sessionLease) {
+        if (this.state.lastTurnStatus !== 'completed') this.terminate();
+      } else if (this.temporaryPermissions) {
         void this.serialize(() => this.restoreTaskPermissions()).catch(() => {});
       }
     } else if (method === 'turn/diff/updated') {
@@ -454,6 +462,7 @@ export class CodexGuiRuntime {
     const childEnv: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
     for (const key of [
       '__PMUX_MCP_INTERNAL_TOKEN', '__PMUX_MCP_INTERNAL_PORT',
+      '__NEXT_PRIVATE_STANDALONE_CONFIG',
       'NEXTAUTH_SECRET', 'AUTH_PASSWORD', 'CONTROL_PLANE_API_KEY', 'OPENAI_ADMIN_KEY',
     ]) delete childEnv[key];
     const child = spawn(command, args, {
@@ -723,6 +732,11 @@ export class CodexGuiRuntime {
     this.state.ready = false;
     this.state.busy = false;
     this.state.error = message;
+    if (this.sessionLease) {
+      const lease = this.sessionLease;
+      clearTimeout(lease.timer); this.sessionLease = null;
+      lease.onLost();
+    }
     if (this.temporaryPermissions) {
       Object.assign(this.state, this.temporaryPermissions);
       this.temporaryPermissions = null;
@@ -782,17 +796,101 @@ export class CodexGuiRuntime {
     });
   }
 
+  /** Only the durable, GUI-approved Task Session coordinator calls this entry point. */
+  async runTaskSessionTurn(options: {
+    sessionId: string; expiresAt: string; text: string; directory: string; hostId: string;
+    workspaceId: string; tabId: string; pinnedThreadId?: string;
+    validate: () => Promise<void>; onLost: () => void;
+  }): Promise<CodexGuiState> {
+    return this.serialize(async () => {
+      if (process.env.PURPLEMUX_MCP_ALLOW_WRITES !== '1' || process.env.PURPLEMUX_MCP_ALLOW_FULL_ACCESS !== '1') throw new Error('Full Access execution disabled');
+      await options.validate();
+      if (this.closed || !this.state.ready || this.state.busy || this.state.approvals.length ||
+          options.workspaceId !== this.workspace.id || options.tabId !== this.tab.id ||
+          options.hostId !== this.executionHostId || this.getWorkspaceCwd() !== options.directory ||
+          Date.parse(options.expiresAt) <= Date.now()) throw new Error('Session target expired, changed or unavailable');
+      if (this.sessionLease && (this.sessionLease.sessionId !== options.sessionId || this.state.threadId !== this.sessionLease.threadId ||
+          this.state.threadId !== options.pinnedThreadId || this.state.cwd !== options.directory)) throw new Error('Session lease or pinned thread mismatch');
+      if (!this.sessionLease && (this.temporaryPermissions || options.pinnedThreadId)) throw new Error('Session lease lost; GUI reapproval required');
+      try {
+        if (!this.sessionLease) {
+          this.temporaryPermissions = { sandboxMode: this.state.sandboxMode, approvalPolicy: this.state.approvalPolicy };
+          const timer = setTimeout(() => this.expireTaskSession(), Math.max(1, Date.parse(options.expiresAt) - Date.now()));
+          timer.unref();
+          this.sessionLease = { sessionId: options.sessionId, expiresAt: options.expiresAt, threadId: null,
+            validate: options.validate, onLost: options.onLost, timer };
+          // A new session gets a dedicated thread; never alter an earlier GUI thread.
+          await this.actionInternal('new-thread', {});
+        } else {
+          this.sessionLease.validate = options.validate;
+          this.sessionLease.onLost = options.onLost;
+        }
+        this.taskTurnId = null; this.earlyTaskCompletions.clear();
+        this.state.sandboxMode = 'danger-full-access'; this.state.approvalPolicy = 'never';
+        return await this.actionInternal('send', { text: options.text });
+      } catch (error) {
+        // Includes uncertain RPC timeout: no subsequent turn may reuse this grant.
+        this.terminate();
+        throw error;
+      }
+    });
+  }
+
+  private expireTaskSession(): void {
+    const lease = this.sessionLease;
+    if (!lease) return;
+    if (this.state.busy && this.state.threadId && this.state.turnId) {
+      // Interrupt on the wire before disconnecting; bounded even if Codex hangs.
+      void this.request('turn/interrupt', { threadId: this.state.threadId, turnId: this.state.turnId }, 5000)
+        .catch(() => {}).finally(() => this.terminate());
+    } else if (this.state.busy || this.pending.size) {
+      this.terminate();
+    } else {
+      void this.finishTaskSession(lease.sessionId).then(() => lease.onLost()).catch(() => this.terminate());
+    }
+  }
+
+  async finishTaskSession(sessionId: string): Promise<void> {
+    // Break an in-flight setup immediately; it must never start after revocation.
+    if (this.sessionLease?.sessionId === sessionId && this.state.busy && (!this.state.turnId || this.pending.size > 0)) {
+      try {
+        if (this.state.threadId && this.state.turnId) {
+          await this.request('turn/interrupt', { threadId: this.state.threadId, turnId: this.state.turnId }, 5000);
+        }
+      } catch { /* An uncertain setup cannot retain Full Access. */ }
+      finally { this.terminate(); }
+    }
+    return this.serialize(async () => {
+      const lease = this.sessionLease;
+      if (!lease) return;
+      if (lease.sessionId !== sessionId) throw new Error('Refusing to release another session lease');
+      try {
+        if (this.state.busy) {
+          await this.actionInternal('interrupt', {});
+          // Interrupt acknowledgement need not mean completion. Disconnect any
+          // still-active process rather than changing its permissions mid-turn.
+          if (this.state.busy) { this.terminate(); return; }
+        }
+        await this.restoreTaskPermissions();
+        clearTimeout(lease.timer); this.sessionLease = null;
+      } catch (error) { this.terminate(); throw error; }
+    });
+  }
+
   private async restoreTaskPermissions(): Promise<void> {
     const saved = this.temporaryPermissions;
     if (!saved) return;
     try {
       // Always send a restoration even if local rollback made values equal.
       if (this.state.threadId && !this.closed) {
-        await this.request('thread/settings/update', {
+        const restored = await this.request('thread/settings/update', {
           threadId: this.state.threadId,
           sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
           approvalPolicy: saved.approvalPolicy,
         }, 30000);
+        if (this.sessionLease && (asRecord(restored.sandboxPolicy).type !== toCodexAppSandboxPolicyType(saved.sandboxMode) || restored.approvalPolicy !== saved.approvalPolicy)) {
+          throw new Error('Saved GUI permissions were not confirmed by Codex');
+        }
       }
       Object.assign(this.state, saved);
       this.temporaryPermissions = null;
@@ -934,6 +1032,19 @@ export class CodexGuiRuntime {
             throw new Error('Codex working directory changed before task submission');
           }
           await this.store();
+        }
+        if (this.sessionLease) {
+          await this.sessionLease.validate();
+          if (Date.parse(this.sessionLease.expiresAt) <= Date.now() || this.state.cwd !== this.getWorkspaceCwd()) throw new Error('Session expired or cwd changed');
+          if (this.sessionLease.threadId && this.sessionLease.threadId !== this.state.threadId) throw new Error('Pinned session thread changed');
+          const confirmed = await this.request('thread/settings/update', {
+            threadId: this.state.threadId, sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
+          }, 30000);
+          // Unlike legacy GUI updates, session grants require the effective values.
+          if (asRecord(confirmed.sandboxPolicy).type !== 'dangerFullAccess' || confirmed.approvalPolicy !== 'never') throw new Error('Full Access settings were not confirmed by Codex');
+          await this.sessionLease.validate();
+          if (Date.parse(this.sessionLease.expiresAt) <= Date.now()) throw new Error('Session expired');
+          this.sessionLease.threadId = this.state.threadId;
         }
         this.state.items.push({ id: 'user-' + Date.now(), type: 'user', text });
         if (this.state.items.length > MAX_ITEMS) this.state.items.shift();

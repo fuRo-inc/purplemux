@@ -143,7 +143,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || submitting || state.busy || !connected || !state.ready) return;
+    if (!text || state.taskPermissionsActive || submitting || state.busy || !connected || !state.ready) return;
     setSubmitting(true);
     setDraft('');
     isNearBottomRef.current = true;
@@ -219,7 +219,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
           {state.busy ? '実行中' : connected ? '接続済み' : '接続待機中'}
         </span>
         {state.cwd && <span className="hidden min-w-0 max-w-[32%] truncate font-mono text-[10px] text-muted-foreground lg:block" title={state.cwd}>{state.cwd}</span>}
-        <Button size="xs" variant="outline" disabled={!connected || !state.ready} onClick={() => setSessionsOpen(true)} title="以前のCodexセッションを検索">
+        <Button size="xs" variant="outline" disabled={!connected || !state.ready || state.taskPermissionsActive} onClick={() => setSessionsOpen(true)} title="以前のCodexセッションを検索">
           <History className="h-3 w-3" /> {!mobile && '以前の会話'}
         </Button>
         <Button size="xs" variant="outline" disabled={!connected || state.busy || state.taskPermissionsActive} onClick={() => void run('new-thread')}>
@@ -307,7 +307,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
       <p className="shrink-0 border-b px-3 pb-2 text-xs text-muted-foreground">
         Sandboxはアクセス範囲、Approvalは範囲外の操作への確認です。nvidia-smiなどGPUの照会でも確認が必要な場合があります。
         Neverは追加承認の拒否です。Full Accessはホストのファイル・コマンドへの制限を解除するため危険です。
-        {state.taskPermissionsActive && ' MCP一時タスクの権限を適用中です。保存済みのGUI設定はタスク後に復帰します。'}
+        {state.taskPermissionsActive && (state.taskSessionId ? ' 承認済みTask Sessionがこのtabを使用中です。通常作業は継続実行します。終了・取消はTasks画面から操作してください。' : ' MCP一時タスクの権限を適用中です。保存済みのGUI設定はタスク後に復帰します。')}
       </p>
       {state.sandboxMode === 'danger-full-access' && (
         <p className="shrink-0 border-b px-3 pb-2 text-xs text-amber-400">
@@ -361,7 +361,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
             placeholder={connected ? 'Codexへ指示を入力…（Shift+Enterで改行）' : 'Codex App Serverへ接続しています…'}
             value={draft}
             rows={mobile ? 2 : 1}
-            disabled={!connected || !state.ready}
+            disabled={!connected || !state.ready || state.taskPermissionsActive}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -375,7 +375,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
               <CircleStop className="h-4 w-4" />
             </Button>
           ) : (
-            <Button size="sm" className="h-11" disabled={!draft.trim() || !state.ready || submitting} onClick={() => void send()} title="送信">
+            <Button size="sm" className="h-11" disabled={!draft.trim() || !state.ready || state.taskPermissionsActive || submitting} onClick={() => void send()} title="送信">
               {submitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
             </Button>
           )}
@@ -387,7 +387,7 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
         workspaceId={workspaceId}
         tabId={tabId}
         currentThreadId={state.threadId}
-        busy={state.busy}
+        busy={state.busy || !!state.taskPermissionsActive}
         onResume={async (session) => {
           const resumed = await request('resume-thread', { threadId: session.id });
           const fallback = resumed.models.find((model) => model.isDefault) || resumed.models[0];

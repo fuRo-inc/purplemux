@@ -1,10 +1,18 @@
-export type TaskSessionStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired';
+export type TaskSessionStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired' | 'completed';
 export interface TaskSession {
   id: string;
   purpose: string;
   hostId: string;
   workdir: string;
   scope: string;
+  workspaceId?: string;
+  tabId?: string;
+  requestedPermissions?: 'full-access';
+  fullAccessWarningAcceptedAt?: string;
+  executionState?: 'idle' | 'running' | 'unknown' | 'complete';
+  ownerInstance?: string;
+  pinnedThreadId?: string;
+  turns?: TaskSessionTurn[];
   expiresAt: string;
   status: TaskSessionStatus;
   source: 'gui' | 'mcp';
@@ -16,7 +24,24 @@ export interface TaskSession {
 export interface TaskSessionAudit {
   id: string;
   taskId: string;
-  event: TaskSessionStatus;
+  event: TaskSessionStatus | 'turn-started' | 'turn-completed' | 'turn-failed';
+  turnId?: string;
+  threadId?: string;
+  instructionHash?: string;
+  result?: string;
   actor: 'gui:user' | 'mcp' | 'system';
   at: string;
+}
+
+export interface TaskSessionTurn {
+  id: string;
+  keyHash: string;
+  instructionHash: string;
+  /** Instructions are hashed only; raw input/output and secrets are never persisted. */
+  instructionPreview: string;
+  startedAt: string;
+  finishedAt?: string;
+  threadId?: string;
+  turnId?: string;
+  result: 'running' | 'completed' | 'failed' | 'unknown';
 }
