@@ -45,14 +45,16 @@ describe('Purplemux read-only MCP bridge', () => {
     });
   });
 
-  it('only advertises read-only tools', async () => {
+  it('advertises status tools and management-only Task Session tools', async () => {
     const response = await dispatchMcpRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const result = response?.result as { tools: { name: string; annotations: { readOnlyHint: boolean } }[] };
     expect(result.tools.map((tool) => tool.name)).toEqual([
       'list_hosts', 'list_workspaces', 'list_codex_tabs', 'get_codex_status',
       'get_codex_task', 'list_codex_tasks',
+      'propose_task_session', 'get_task_session', 'list_task_sessions',
     ]);
-    expect(result.tools.every((tool) => tool.annotations.readOnlyHint)).toBe(true);
+    expect(result.tools.filter((tool) => tool.name !== 'propose_task_session').every((tool) => tool.annotations.readOnlyHint)).toBe(true);
+    expect(result.tools.find((tool) => tool.name === 'propose_task_session')?.annotations.readOnlyHint).toBe(false);
     expect(result.tools.some((tool) => tool.name.includes('send') || tool.name.includes('exec'))).toBe(false);
   });
 

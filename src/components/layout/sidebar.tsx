@@ -681,6 +681,7 @@ const Sidebar = () => {
                   </div>
                 );
               })}
+              <a href="/task-sessions" title="Task Sessions — 承認記録のみ、実行権限は未連携" className="rounded px-1 text-xs text-muted-foreground hover:bg-sidebar-accent">Tasks</a>
               <div className="relative">
                 <button
                   className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-sidebar-accent"

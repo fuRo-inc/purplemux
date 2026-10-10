@@ -1,5 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { timingSafeEqual } from 'node:crypto';
+import { dispatchTaskSessionMcp } from '@/lib/mcp-task-sessions';
+import { TaskSessionError } from '@/lib/task-session-store';
 import { listBridgeCodexTabs, getBridgeCodexStatus } from '@/lib/mcp-bridge-data';
 import {
   submitCodexTask, getCodexTask, listCodexTasks, interruptCodexTask, respondCodexApproval,
@@ -40,6 +42,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     let data: unknown;
     switch (operation) {
+      case 'propose_task_session':
+      case 'get_task_session':
+      case 'list_task_sessions':
+        try { data = await dispatchTaskSessionMcp(operation, options); }
+        catch (error) {
+          return res.status(error instanceof TaskSessionError ? error.status : 503)
+            .json({ ok: false, error: error instanceof TaskSessionError ? error.message : 'Task session storage unavailable' });
+        }
+        break;
       case 'list_codex_tabs':
         data = await listBridgeCodexTabs(options.workspaceId);
         break;
