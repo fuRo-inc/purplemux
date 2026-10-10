@@ -119,6 +119,51 @@ export class CodexGuiRuntime {
     validate: () => Promise<void>; onLost: () => void; timer: ReturnType<typeof setTimeout>;
   } | null = null;
   private temporaryPermissions: { sandboxMode: CodexGuiSandbox; approvalPolicy: CodexGuiApprovalPolicy } | null = null;
+  // thread/settings/update acknowledges with {}, while effective values arrive
+  // asynchronously in thread/settings/updated (and in thread/start).
+  private effectiveThreadSettings: { threadId: string; sandboxPolicyType: string; approvalPolicy: string } | null = null;
+  private settingsConfirmation: {
+    threadId: string; sandboxPolicyType: string; approvalPolicy: string; resolve: () => void;
+  } | null = null;
+
+  private noteEffectiveThreadSettings(threadId: string, sandboxPolicyType: string, approvalPolicy: string): void {
+    if (!threadId || !sandboxPolicyType || !approvalPolicy) return;
+    this.effectiveThreadSettings = { threadId, sandboxPolicyType, approvalPolicy };
+    const pending = this.settingsConfirmation;
+    if (pending && pending.threadId === threadId && pending.sandboxPolicyType === sandboxPolicyType &&
+        pending.approvalPolicy === approvalPolicy) pending.resolve();
+  }
+
+  private async updateSessionThreadSettings(sandboxMode: CodexGuiSandbox, approvalPolicy: CodexGuiApprovalPolicy): Promise<void> {
+    const threadId = this.state.threadId;
+    if (!threadId || this.settingsConfirmation) throw new Error('Thread settings confirmation unavailable');
+    const sandboxPolicyType = toCodexAppSandboxPolicyType(sandboxMode);
+    const confirmed = () => this.effectiveThreadSettings?.threadId === threadId &&
+      this.effectiveThreadSettings.sandboxPolicyType === sandboxPolicyType &&
+      this.effectiveThreadSettings.approvalPolicy === approvalPolicy;
+    let signal!: () => void;
+    const notification = new Promise<void>((resolve) => { signal = resolve; });
+    const waiter = { threadId, sandboxPolicyType, approvalPolicy, resolve: signal };
+    this.settingsConfirmation = waiter;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      // The RPC acknowledgement itself does NOT contain the new settings.
+      await this.request('thread/settings/update', {
+        threadId, sandboxPolicy: { type: sandboxPolicyType }, approvalPolicy,
+      }, 30000);
+      // A no-op update produces no notification; accept only a previously
+      // server-confirmed effective state (thread/start or a prior notification).
+      if (!confirmed()) {
+        await Promise.race([notification, new Promise<void>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error('Thread settings notification not confirmed')), 10000);
+        })]);
+      }
+      if (!confirmed() || !this.state.running || this.closed) throw new Error('Thread settings were not confirmed by Codex');
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (this.settingsConfirmation === waiter) this.settingsConfirmation = null;
+    }
+  }
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const next = this.actions.catch(() => {}).then(operation);
     this.actions = next;
@@ -253,6 +298,13 @@ export class CodexGuiRuntime {
     // A single App Server can have several loaded Codex threads. Only render
     // events from the thread currently attached to this Purplemux tab.
     if (typeof params.threadId === 'string' && params.threadId !== this.state.threadId) return;
+    if (method === 'thread/settings/updated') {
+      const settings = asRecord(params.threadSettings);
+      this.noteEffectiveThreadSettings(asString(params.threadId),
+        asString(asRecord(settings.sandboxPolicy).type), asString(settings.approvalPolicy));
+      this.publish();
+      return;
+    }
     const item = asRecord(params.item);
     const itemId = asString(params.itemId) || asString(item.id);
     const type = asString(item.type);
@@ -547,6 +599,8 @@ export class CodexGuiRuntime {
           sandbox: this.state.sandboxMode,
         }, 40000);
         this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || this.state.cwd;
+        this.noteEffectiveThreadSettings(this.state.threadId!,
+          asString(asRecord(result.sandbox).type), asString(result.approvalPolicy));
         // thread/resume may return a summary rather than all messages.
         // Recover the transcript explicitly from the durable local/remote thread.
         try {
@@ -735,6 +789,7 @@ export class CodexGuiRuntime {
     this.state.ready = false;
     this.state.busy = false;
     this.state.error = message;
+    this.effectiveThreadSettings = null;
     if (this.sessionLease) {
       const lease = this.sessionLease;
       clearTimeout(lease.timer); this.sessionLease = null;
@@ -887,13 +942,14 @@ export class CodexGuiRuntime {
     try {
       // Always send a restoration even if local rollback made values equal.
       if (this.state.threadId && !this.closed) {
-        const restored = await this.request('thread/settings/update', {
-          threadId: this.state.threadId,
-          sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
-          approvalPolicy: saved.approvalPolicy,
-        }, 30000);
-        if (this.sessionLease && (asRecord(restored.sandboxPolicy).type !== toCodexAppSandboxPolicyType(saved.sandboxMode) || restored.approvalPolicy !== saved.approvalPolicy)) {
-          throw new Error('Saved GUI permissions were not confirmed by Codex');
+        if (this.sessionLease) {
+          await this.updateSessionThreadSettings(saved.sandboxMode, saved.approvalPolicy);
+        } else {
+          await this.request('thread/settings/update', {
+            threadId: this.state.threadId,
+            sandboxPolicy: { type: toCodexAppSandboxPolicyType(saved.sandboxMode) },
+            approvalPolicy: saved.approvalPolicy,
+          }, 30000);
         }
       }
       Object.assign(this.state, saved);
@@ -999,6 +1055,7 @@ export class CodexGuiRuntime {
     if (action === 'new-thread') {
       if (this.state.busy) throw new Error('Codex is working. Stop the current turn first.');
       this.state.threadId = null;
+      this.effectiveThreadSettings = null;
       this.state.cwd = this.getWorkspaceCwd();
       this.state.lastTurnId = null;
       this.state.lastTurnStatus = null;
@@ -1032,6 +1089,16 @@ export class CodexGuiRuntime {
           if (!id) throw new Error('Codex did not return a thread ID');
           this.state.threadId = id;
           this.state.cwd = asString(result.cwd) || asString(asRecord(result.thread).cwd) || cwd;
+          if (this.sessionLease) {
+            // thread/start is authoritative for the first turn; it also covers
+            // a no-op settings/update that emits no follow-up notification.
+            const sandboxPolicyType = asString(asRecord(result.sandbox).type);
+            const approvalPolicy = asString(result.approvalPolicy);
+            if (sandboxPolicyType !== 'dangerFullAccess' || approvalPolicy !== 'never') {
+              throw new Error('Full Access thread/start settings not confirmed by Codex');
+            }
+            this.noteEffectiveThreadSettings(id, sandboxPolicyType, approvalPolicy);
+          }
           if (this.temporaryPermissions && this.state.cwd.replace(/\/+$/, '') !== cwd.replace(/\/+$/, '')) {
             throw new Error('Codex working directory changed before task submission');
           }
@@ -1041,11 +1108,9 @@ export class CodexGuiRuntime {
           await this.sessionLease.validate();
           if (Date.parse(this.sessionLease.expiresAt) <= Date.now() || this.state.cwd !== this.getWorkspaceCwd()) throw new Error('Session expired or cwd changed');
           if (this.sessionLease.threadId && this.sessionLease.threadId !== this.state.threadId) throw new Error('Pinned session thread changed');
-          const confirmed = await this.request('thread/settings/update', {
-            threadId: this.state.threadId, sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
-          }, 30000);
-          // Unlike legacy GUI updates, session grants require the effective values.
-          if (asRecord(confirmed.sandboxPolicy).type !== 'dangerFullAccess' || confirmed.approvalPolicy !== 'never') throw new Error('Full Access settings were not confirmed by Codex');
+          // The effective settings are confirmed via thread/start or
+          // thread/settings/updated; the immediate RPC reply is always {}.
+          await this.updateSessionThreadSettings('danger-full-access', 'never');
           await this.sessionLease.validate();
           if (Date.parse(this.sessionLease.expiresAt) <= Date.now()) throw new Error('Session expired');
           this.sessionLease.threadId = this.state.threadId;
