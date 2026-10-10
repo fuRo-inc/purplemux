@@ -1,9 +1,9 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiRequest, NextApiResponse, PageConfig } from 'next';
 import { authenticateTaskSessionGui } from '@/lib/task-session-gui-auth';
 import { TaskSessionError, taskSessions } from '@/lib/task-session-store';
 import { z } from 'zod';
 
-export const config = { api: { bodyParser: { sizeLimit: '64kb' as const } } };
+export const config = { api: { bodyParser: { sizeLimit: '64kb' } } } satisfies PageConfig;
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
