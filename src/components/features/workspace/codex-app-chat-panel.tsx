@@ -84,9 +84,12 @@ export default function CodexAppChatPanel({ workspaceId, tabId, mobile = false }
     options: Record<string, unknown> = {},
   ) => {
     setActionError('');
+    // Fresh session-bound CSRF for each explicit user action; never retry a mutation.
+    const csrfResponse = await fetch('/api/codex-app/csrf', { cache: 'no-store' });
+    const csrf = csrfResponse.ok ? await csrfResponse.json() as { csrfToken: string } : null;
     const result = await fetch('/api/codex-app/action', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(csrf ? { 'x-task-session-csrf': csrf.csrfToken } : {}) },
       body: JSON.stringify({ workspaceId, tabId, action, ...options }),
     });
     const body = await result.json() as CodexGuiState & { error?: string };

@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { TaskSessionStore, validateTaskSessionTarget, type TaskSessionTargetValidator } from '@/lib/task-session-store';
+import { TaskSessionStore, validateTaskSessionTarget, type TaskSessionTargetValidator, TASK_SESSION_LEASE_MS, taskSessionConnection } from '@/lib/task-session-store';
 
 let directory: string;
 let store: TaskSessionStore;
 let now: number;
 let validate: ReturnType<typeof vi.fn<TaskSessionTargetValidator>>;
+const capability = 'A'.repeat(43);
 const input = (key = 'retry-1') => ({ purpose: 'Implement tests', hostId: 'local', workdir: '/tmp/workspace',
   scope: 'Only management API', expiresAt: new Date(now + 3600000).toISOString(), idempotencyKey: key });
 beforeEach(async () => {
@@ -193,43 +194,43 @@ describe('durable Task Session execution authority', () => {
   beforeEach(() => { vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1'); });
   afterEach(() => vi.unstubAllEnvs());
   const approved = async () => {
-    const r = await store.propose(proposal(), 'mcp');
+    const r = await store.propose(proposal(), 'mcp', capability);
     await store.decide(r.id, 'approved', 'pending', true); return r;
   };
   it('does not execute before authenticated GUI warning approval', async () => {
-    const r = await store.propose(proposal(), 'mcp');
-    await expect(store.beginTurn(r.id, target, 'Build', 't1')).rejects.toThrow('GUI-approved');
+    const r = await store.propose(proposal(), 'mcp', capability);
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('GUI-approved');
     await expect(store.decide(r.id, 'approved', 'pending')).rejects.toThrow('GUI warning');
     expect((await store.detail(r.id)).record.status).toBe('pending');
     await expect(store.propose({ ...proposal('forged'), confirmFullAccess: true }, 'mcp')).rejects.toThrow('Invalid');
   });
   it.each(['PURPLEMUX_MCP_ALLOW_WRITES', 'PURPLEMUX_MCP_ALLOW_FULL_ACCESS'])('requires administrator %s opt-in', async (flag) => {
     const r = await approved(); vi.stubEnv(flag, '0');
-    await expect(store.beginTurn(r.id, target, 'Build', 't1')).rejects.toThrow('disabled');
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('disabled');
     expect((await store.detail(r.id)).record.turns).toBeUndefined();
   });
   it.each([{ hostId: 'other' }, { workdir: '/tmp/other' }, { workspaceId: 'other' }, { tabId: 'other' }])('rejects changed target %j', async (change) => {
     const r = await approved();
-    await expect(store.beginTurn(r.id, { ...target, ...change }, 'Build', 't1')).rejects.toThrow('mismatch');
+    await expect(store.beginTurn(r.id, { ...target, ...change }, 'Build', 't1', capability)).rejects.toThrow('mismatch');
   });
   it('revalidates registered targets on each continuation', async () => {
-    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1');
+    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1', capability);
     validate.mockRejectedValueOnce(new Error('Tab deleted'));
-    await expect(store.assertTurn(r.id, t.turn.id, target)).rejects.toThrow('Tab deleted');
+    await expect(store.assertTurn(r.id, t.turn.id, target)).rejects.toThrow('binding changed');
   });
   it('never promotes old GUI-only approvals', async () => {
     const r = await store.propose(input('legacy'), 'gui'); await store.decide(r.id, 'approved');
-    await expect(store.beginTurn(r.id, target, 'Build', 't1')).rejects.toThrow('Legacy');
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('Legacy');
   });
   it('atomically reserves turns, prevents concurrent injection, and audits two turns without secrets/output', async () => {
     const r = await approved();
-    const reservations = await Promise.all(Array.from({ length: 8 }, () => store.beginTurn(r.id, target, 'password=secret Build', 't1')));
+    const reservations = await Promise.all(Array.from({ length: 8 }, () => store.beginTurn(r.id, target, 'password=secret Build', 't1', capability)));
     expect(reservations.filter((v) => !v.existing)).toHaveLength(1);
     const t1 = reservations[0].turn;
-    await expect(store.beginTurn(r.id, target, 'Build', 't2')).rejects.toThrow('active');
-    await expect(store.beginTurn(r.id, target, 'different', 't1')).rejects.toThrow('conflict');
+    await expect(store.beginTurn(r.id, target, 'Build', 't2', capability)).rejects.toThrow('active');
+    await expect(store.beginTurn(r.id, target, 'different', 't1', capability)).rejects.toThrow('conflict');
     await store.bindTurn(r.id, t1.id, 'thread1', 'codex-turn1'); await store.settleTurn(r.id, t1.id, 'completed');
-    const t2 = await store.beginTurn(r.id, target, 'Fix then rebuild', 't2');
+    const t2 = await store.beginTurn(r.id, target, 'Fix then rebuild', 't2', capability);
     await expect(store.bindTurn(r.id, t2.turn.id, 'thread2', 'codex-turn2')).rejects.toThrow('Pinned');
     await store.bindTurn(r.id, t2.turn.id, 'thread1', 'codex-turn2'); await store.settleTurn(r.id, t2.turn.id, 'completed');
     const detail = await store.detail(r.id);
@@ -238,32 +239,35 @@ describe('durable Task Session execution authority', () => {
     expect(detail.audit.filter((e) => e.event === 'turn-completed')).toHaveLength(2);
     expect(await fs.readFile(path.join(directory, 'records.json'), 'utf8')).not.toContain('password=secret');
     await store.finish(r.id);
-    await expect(store.beginTurn(r.id, target, 'Build', 't3')).rejects.toThrow('GUI-approved');
+    await expect(store.beginTurn(r.id, target, 'Build', 't3', capability)).rejects.toThrow('GUI-approved');
   });
   it('excludes a second session from a tab even between turns', async () => {
-    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1'); await store.settleTurn(r.id, t.turn.id, 'completed');
-    const other = await store.propose({ ...proposal('other'), purpose: 'Other task' }, 'mcp'); await store.decide(other.id, 'approved', 'pending', true);
-    await expect(store.beginTurn(other.id, target, 'Build', 't2')).rejects.toThrow('lease');
-    await store.finish(r.id, true);
-    expect((await store.beginTurn(other.id, target, 'Build', 't2')).existing).toBe(false);
+    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1', capability); await store.settleTurn(r.id, t.turn.id, 'completed');
+    const other = await store.propose({ ...proposal('other'), purpose: 'Other task' }, 'mcp', capability); await store.decide(other.id, 'approved', 'pending', true);
+    await expect(store.beginTurn(other.id, target, 'Build', 't2', capability)).rejects.toThrow('lease');
+    await store.finish(r.id, true); await store.acknowledgeOwnerRelease(r.id);
+    expect((await store.beginTurn(other.id, target, 'Build', 't2', capability)).existing).toBe(false);
   });
   it.each(['failed', 'unknown'] as const)('revokes on %s and requires a new GUI proposal', async (result) => {
-    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1'); await store.settleTurn(r.id, t.turn.id, result);
+    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1', capability); await store.settleTurn(r.id, t.turn.id, result);
     expect((await store.detail(r.id)).record.status).toBe('revoked');
-    await expect(store.beginTurn(r.id, target, 'retry', 't2')).rejects.toThrow('GUI-approved');
+    await expect(store.beginTurn(r.id, target, 'retry', 't2', capability)).rejects.toThrow('GUI-approved');
   });
   it('revokes both idle and running owned sessions after process restart', async () => {
-    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1');
+    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1', capability);
     await store.settleTurn(r.id, t.turn.id, 'completed');
+    now += TASK_SESSION_LEASE_MS;
     const restarted = new TaskSessionStore(directory, validate, () => now, 'new-process');
     expect((await restarted.detail(r.id)).record).toMatchObject({ status: 'revoked', executionState: 'unknown' });
-    const r2 = await store.propose({ ...proposal('restart2'), purpose: 'Second task' }, 'mcp'); await store.decide(r2.id, 'approved', 'pending', true);
-    await store.beginTurn(r2.id, target, 'Build', 't1');
+    await store.acknowledgeOwnerRelease(r.id); // Simulated old process is still alive in this test.
+    const r2 = await store.propose({ ...proposal('restart2'), purpose: 'Second task' }, 'mcp', capability); await store.decide(r2.id, 'approved', 'pending', true);
+    await store.beginTurn(r2.id, target, 'Build', 't1', capability);
+    now += TASK_SESSION_LEASE_MS;
     const detail = await restarted.detail(r2.id);
     expect(detail.record.status).toBe('revoked'); expect(detail.record.turns?.[0].result).toBe('unknown');
   });
   it('expires and rejects an already reserved turn before RPC', async () => {
-    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1'); now += 3600001;
+    const r = await approved(); const t = await store.beginTurn(r.id, target, 'Build', 't1', capability); now += 3600001;
     await expect(store.assertTurn(r.id, t.turn.id, target)).rejects.toThrow('GUI-approved');
     expect((await store.detail(r.id)).record.status).toBe('expired');
     expect((await store.detail(r.id)).audit).toContainEqual(expect.objectContaining({ event: 'turn-failed', result: 'unknown', instructionHash: t.turn.instructionHash }));
@@ -272,5 +276,189 @@ describe('durable Task Session execution authority', () => {
     const { expiresAt: _expiresAt, ...p } = proposal();
     const first = await store.propose({ ...p, ttl: 3600 }, 'mcp'); now += 1000;
     expect((await store.propose({ ...p, ttl: 3600 }, 'mcp')).id).toBe(first.id);
+  });
+});
+
+describe('cross-worker leases and execution capabilities', () => {
+  const target = { hostId: 'local', workdir: '/tmp/workspace', workspaceId: 'ws', tabId: 'tab' };
+  const proposal = () => ({ ...input(), ...target, requestedPermissions: 'full-access' });
+  beforeEach(() => { vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1'); });
+  afterEach(() => vi.unstubAllEnvs());
+  const reserve = async () => {
+    const r = await store.propose(proposal(), 'mcp', capability);
+    await store.decide(r.id, 'approved', 'pending', true);
+    return store.beginTurn(r.id, target, 'Build', 't1', capability);
+  };
+  it('preserves a live owner through another worker list/detail and blocks GUI mutation/runtime creation', async () => {
+    const other = new TaskSessionStore(directory, validate, () => now, 'reader-worker');
+    const r = await reserve();
+    expect((await other.list())[0].status).toBe('approved');
+    expect((await other.detail(r.record.id)).record.executionState).toBe('running');
+    const operation = vi.fn(async () => 'started');
+    await expect(other.withTabAccess('ws', 'tab', true, operation)).rejects.toThrow('active Task Session');
+    await expect(store.withTabAccess('ws', 'tab', false, operation)).rejects.toThrow('active Task Session');
+    await expect(other.beginTurn(r.record.id, target, 'Build', 't1', capability)).rejects.toThrow('another worker');
+    expect(operation).not.toHaveBeenCalled();
+    await store.settleTurn(r.record.id, r.turn.id, 'completed');
+    now += 10000; await store.heartbeat(r.record.id); now += 10000;
+    expect((await other.detail(r.record.id)).record).toMatchObject({ status: 'approved', executionState: 'idle' });
+    await other.decide(r.record.id, 'revoked', 'approved');
+    await expect(store.heartbeat(r.record.id)).rejects.toThrow('lease lost');
+    expect((await store.detail(r.record.id)).record.status).toBe('revoked');
+  });
+  it('preserves a genuinely independent live Node owner and revokes after its process exits', async () => {
+    const marker = path.join(directory, 'child-reserved');
+    const proposalArgs = proposal();
+    const code = `const fs = require('node:fs/promises');
+      const { TaskSessionStore } = require('./src/lib/task-session-store');
+      (async () => {
+        const child = new TaskSessionStore(${JSON.stringify(directory)}, async () => {}, Date.now, 'independent-child');
+        const r = await child.propose(${JSON.stringify(proposalArgs)}, 'mcp', ${JSON.stringify(capability)});
+        await child.decide(r.id, 'approved', 'pending', true);
+        await child.beginTurn(r.id, ${JSON.stringify(target)}, 'Build', 't1', ${JSON.stringify(capability)});
+        await fs.writeFile(${JSON.stringify(marker)}, r.id);
+        await new Promise(r => setTimeout(r, 1500));
+      })().catch(e => { process.stderr.write(e.message); process.exitCode = 1; });`;
+    const child = promisify(execFile)(process.execPath, ['--import', 'tsx', '-e', code], { cwd: process.cwd() });
+    let taskId = '';
+    for (let i = 0; i < 100; i++) {
+      try { taskId = await fs.readFile(marker, 'utf8'); break; } catch { await new Promise(r => setTimeout(r, 20)); }
+    }
+    try {
+      expect(taskId).toBeTruthy();
+      const reader = new TaskSessionStore(directory, validate, () => now, 'parent-reader');
+      expect((await reader.list())[0].status).toBe('approved');
+      expect((await reader.detail(taskId)).record.ownerLease?.pid).not.toBe(process.pid);
+      await child;
+      expect((await reader.detail(taskId)).record).toMatchObject({ status: 'revoked', executionState: 'unknown' });
+    } finally { await child; }
+  }, 10000);
+  it('does not let readers heartbeat or steal an idle lease; stale authority never resumes', async () => {
+    const r = await reserve(); await store.settleTurn(r.record.id, r.turn.id, 'completed');
+    const other = new TaskSessionStore(directory, validate, () => now, 'other-worker');
+    await expect(other.heartbeat(r.record.id)).rejects.toThrow('lease lost');
+    now += TASK_SESSION_LEASE_MS;
+    expect((await other.detail(r.record.id)).record).toMatchObject({ status: 'revoked', executionState: 'unknown' });
+    await expect(store.beginTurn(r.record.id, target, 'Build', 't2', capability)).rejects.toThrow('GUI-approved');
+    await expect(other.beginTurn(r.record.id, target, 'Build', 't2', capability)).rejects.toThrow('GUI-approved');
+  });
+  it('blocks stale takeover until the live owner confirms that its runtime has stopped', async () => {
+    const r = await reserve(); now += TASK_SESSION_LEASE_MS;
+    const other = new TaskSessionStore(directory, validate, () => now, 'new-worker');
+    expect((await other.detail(r.record.id)).record.status).toBe('revoked');
+    const next = await other.propose({ ...proposal(), purpose: 'Replacement task', idempotencyKey: 'replacement' }, 'mcp', capability);
+    await other.decide(next.id, 'approved', 'pending', true);
+    await expect(other.beginTurn(next.id, target, 'Build', 't2', capability)).rejects.toThrow('active lease');
+    await other.acknowledgeOwnerRelease(r.record.id); // Non-owner cannot clear the barrier.
+    await expect(other.withTabAccess('ws', 'tab', true, async () => {})).rejects.toThrow('active Task Session');
+    await store.acknowledgeOwnerRelease(r.record.id); // Runtime stop acknowledgement by the owner.
+    expect((await other.beginTurn(next.id, target, 'Build', 't2', capability)).existing).toBe(false);
+  });
+  it('fails closed without permitting takeover when process identity becomes unobservable', async () => {
+    const r = await reserve();
+    const readFile = fs.readFile.bind(fs);
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(async (...args: Parameters<typeof fs.readFile>) => {
+      if (args[0] === `/proc/${process.pid}/stat`) throw Object.assign(new Error('not readable'), { code: 'EACCES', path: args[0] });
+      return readFile(...args);
+    });
+    const other = new TaskSessionStore(directory, validate, () => now, 'reader-worker');
+    expect((await other.detail(r.record.id)).record.status).toBe('revoked');
+    await expect(other.withTabAccess('ws', 'tab', true, async () => {})).rejects.toThrow('active Task Session');
+    spy.mockRestore(); await store.acknowledgeOwnerRelease(r.record.id);
+    await expect(other.withTabAccess('ws', 'tab', true, async () => 'safe')).resolves.toBe('safe');
+  });
+  it.each(['processStart', 'pid', 'missing'] as const)('rejects PID reuse/dead process/legacy lease: %s', async (change) => {
+    const r = await reserve();
+    const file = path.join(directory, 'records.json'); const state = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (change === 'missing') delete state.records[0].ownerLease;
+    else if (change === 'pid') state.records[0].ownerLease.pid = 2147483647;
+    else state.records[0].ownerLease.processStart = 'previous-boot:previous-process';
+    await fs.writeFile(file, JSON.stringify(state));
+    const detail = await store.detail(r.record.id);
+    expect(detail.record.status).toBe('revoked'); expect(detail.record.turns?.[0].result).toBe('unknown');
+  });
+  it('converges a persisted reservation orphan after a partial fsync failure without executing again', async () => {
+    const r = await store.propose(proposal(), 'mcp', capability); await store.decide(r.id, 'approved', 'pending', true);
+    const open = fs.open.bind(fs);
+    const spy = vi.spyOn(fs, 'open').mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (args[0] === directory) vi.spyOn(handle, 'sync').mockRejectedValueOnce(new Error('directory sync failed'));
+      return handle;
+    });
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('directory sync failed');
+    spy.mockRestore();
+    expect((await store.detail(r.id)).record.executionState).toBe('running');
+    now += TASK_SESSION_LEASE_MS;
+    expect((await store.detail(r.id)).record).toMatchObject({ status: 'revoked', executionState: 'unknown' });
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('GUI-approved');
+  });
+  it('requires a capability even when caller B knows task UUID, target and proposal key', async () => {
+    const r = await store.propose(proposal(), 'mcp', capability); await store.decide(r.id, 'approved', 'pending', true);
+    await expect(store.beginTurn(r.id, target, 'Build', 't1')).rejects.toThrow('capability required');
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', 'B'.repeat(43))).rejects.toThrow('capability required');
+    await expect(store.requireCapability(r.id, 'B'.repeat(43))).rejects.toThrow('capability required');
+    await expect(store.propose(proposal(), 'mcp', 'B'.repeat(43))).rejects.toThrow('capability required');
+    expect((await store.propose(proposal(), 'mcp', capability)).id).toBe(r.id);
+    expect(JSON.stringify(await store.list())).not.toContain(capability);
+    expect(JSON.stringify(await store.detail(r.id))).not.toContain(capability);
+    const raw = await fs.readFile(path.join(directory, 'records.json'), 'utf8');
+    expect(raw).not.toContain(capability); expect(raw).toContain('capabilities');
+  });
+  it('rejects accidentally embedding the capability in persisted text or Codex instructions', async () => {
+    await expect(store.propose({ ...proposal(), purpose: 'Use ' + capability }, 'mcp', capability)).rejects.toThrow('must not appear');
+    const r = await reserve(); await store.settleTurn(r.record.id, r.turn.id, 'completed');
+    await expect(store.beginTurn(r.record.id, target, 'Use ' + capability, 't2', capability)).rejects.toThrow('Invalid turn');
+    expect(JSON.stringify((await store.detail(r.record.id)).audit)).not.toContain(capability);
+  });
+  it('fails closed for executable-looking legacy records without a stored capability', async () => {
+    const r = await store.propose(proposal(), 'mcp'); await store.decide(r.id, 'approved', 'pending', true);
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('capability required');
+  });
+});
+
+describe('remote endpoint bindings', () => {
+  const target = { hostId: 'remote', workdir: '/srv/project', workspaceId: 'ws', tabId: 'tab' };
+  const endpoint = { id: 'remote', address: 'approved.example', username: 'dev', port: 22 };
+  const hosts = () => path.join(directory, '.purplemux', 'hosts.json');
+  const proposal = () => ({ ...input(), ...target, requestedPermissions: 'full-access' });
+  beforeEach(async () => {
+    vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1');
+    vi.spyOn(os, 'homedir').mockReturnValue(directory);
+    await fs.mkdir(path.dirname(hosts())); await fs.writeFile(hosts(), JSON.stringify({ hosts: [endpoint] }));
+  });
+  afterEach(() => vi.unstubAllEnvs());
+  it.each([{ address: 'unapproved.example' }, { username: 'root' }, { port: 2222 }])('rejects reassignment before GUI approval: %j', async (change) => {
+    const r = await store.propose(proposal(), 'mcp', capability);
+    expect(r.targetConnection).toEqual({ address: endpoint.address, username: endpoint.username, port: 22 });
+    await fs.writeFile(hosts(), JSON.stringify({ hosts: [{ ...endpoint, ...change }] }));
+    await expect(store.decide(r.id, 'approved', 'pending', true)).rejects.toThrow('connection changed');
+    expect((await store.detail(r.id)).record.status).toBe('pending');
+  });
+  it.each(['before-turn', 'running', 'idle'] as const)('revokes reassignment %s without endpoint details in audit', async (phase) => {
+    const r = await store.propose(proposal(), 'mcp', capability); await store.decide(r.id, 'approved', 'pending', true);
+    if (phase !== 'before-turn') {
+      const turn = await store.beginTurn(r.id, target, 'Build', 't1', capability);
+      if (phase === 'idle') await store.settleTurn(r.id, turn.turn.id, 'completed');
+    }
+    await fs.writeFile(hosts(), JSON.stringify({ hosts: [{ ...endpoint, address: 'unapproved.example' }] }));
+    if (phase === 'before-turn') await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('binding changed');
+    else await expect(store.heartbeat(r.id)).rejects.toThrow('connection changed');
+    const detail = await store.detail(r.id); expect(detail.record.status).toBe('revoked');
+    expect(JSON.stringify(detail.audit)).not.toContain('example');
+  });
+  it('revokes idle sessions when workspace/tab/workdir validation changes', async () => {
+    const r = await store.propose(proposal(), 'mcp', capability); await store.decide(r.id, 'approved', 'pending', true);
+    const turn = await store.beginTurn(r.id, target, 'Build', 't1', capability); await store.settleTurn(r.id, turn.turn.id, 'completed');
+    validate.mockRejectedValueOnce(new Error('Workspace/tab removed or directory changed'));
+    await expect(store.heartbeat(r.id)).rejects.toThrow('directory changed');
+    expect((await store.detail(r.id)).record.status).toBe('revoked');
+  });
+  it('rejects legacy remote fingerprint', async () => {
+    const r = await store.propose(proposal(), 'mcp', capability); await store.decide(r.id, 'approved', 'pending', true);
+    const file = path.join(directory, 'records.json'); const state = JSON.parse(await fs.readFile(file, 'utf8'));
+    delete state.records[0].targetFingerprint; await fs.writeFile(file, JSON.stringify(state));
+    await expect(store.beginTurn(r.id, target, 'Build', 't1', capability)).rejects.toThrow('binding changed');
+    expect((await store.detail(r.id)).record.status).toBe('revoked');
+    expect(await taskSessionConnection('remote')).toHaveProperty('fingerprint');
   });
 });

@@ -1,5 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCodexAppTab } from '@/lib/codex-app-tab';
+import { authenticateTaskSessionGui } from '@/lib/task-session-gui-auth';
+import { taskSessions, TaskSessionError } from '@/lib/task-session-store';
 import { getCodexGuiRuntime } from '@/lib/codex-app-gui';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -28,12 +30,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'Invalid Codex permission or speed settings' });
   }
   try {
+    const explicitElevation = sandboxMode === 'danger-full-access' || approvalPolicy === 'never';
+    if (explicitElevation) await authenticateTaskSessionGui(req);
     const { workspace, tab } = await resolveCodexAppTab(workspaceId, tabId);
     const runtime = await getCodexGuiRuntime(workspace, tab);
-    const snapshot = await runtime.action(action, { text, model, effort, requestId, decision, threadId, sandboxMode, approvalPolicy, fastMode });
+    const snapshot = await taskSessions.withTabAccess(workspace.id, tab.id, ['approve', 'interrupt'].includes(action), async () => {
+      const current = runtime.snapshot();
+      // A CLI caller must also be unable to reuse deliberately elevated GUI settings.
+      if (!explicitElevation && (current.taskPermissionsActive ||
+          (['send', 'new-thread', 'resume-thread', 'settings'].includes(action) &&
+            (current.sandboxMode === 'danger-full-access' || current.approvalPolicy === 'never')))) await authenticateTaskSessionGui(req);
+      return runtime.action(action, { text, model, effort, requestId, decision, threadId, sandboxMode, approvalPolicy, fastMode });
+    });
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json(snapshot);
   } catch (error) {
-    return res.status(400).json({ error: error instanceof Error ? error.message : 'Codex request failed' });
+    return res.status(error instanceof TaskSessionError ? error.status : 400).json({ error: error instanceof Error ? error.message : 'Codex request failed' });
   }
 }

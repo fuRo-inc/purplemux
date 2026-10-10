@@ -206,7 +206,7 @@ describe('private MCP runtime route', () => {
     const args = { workspaceId: 'ws', tabId: 'tab', requestedPermissions: 'full-access', purpose: 'test', hostId: 'local', workdir: '/tmp/test', scope: 'API only',
       expiresAt: new Date(Date.now() + 3600000).toISOString(), idempotencyKey: 'key' };
     const response = res(); await internalHandler(internal({ body: { operation: 'propose_task_session', args } }), response);
-    expect(propose).toHaveBeenCalledWith(args, 'mcp'); expect(response.status).toHaveBeenCalledWith(200);
+    expect(propose).toHaveBeenCalledWith(args, 'mcp', expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)); expect(response.status).toHaveBeenCalledWith(200);
     expect(submitCodexTask).not.toHaveBeenCalled();
   });
   it('has no approve operation, even with valid internal credentials', async () => {

@@ -11,6 +11,9 @@ export interface TaskSession {
   fullAccessWarningAcceptedAt?: string;
   executionState?: 'idle' | 'running' | 'unknown' | 'complete';
   ownerInstance?: string;
+  ownerLease?: { pid: number; processStart: string; expiresAt: string; releasedAt?: string };
+  targetFingerprint?: string;
+  targetConnection?: { address: string; username: string; port: number };
   pinnedThreadId?: string;
   turns?: TaskSessionTurn[];
   expiresAt: string;

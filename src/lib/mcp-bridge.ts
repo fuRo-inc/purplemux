@@ -188,7 +188,7 @@ const rpcError = (id: RpcId, code: number, message: string, data?: unknown): Rpc
 });
 
 const serverInfo = { name: 'purplemux-readonly', version: '0.1.0' };
-const instructions = () => 'Propose Task Sessions for logged-in GUI approval, then continue normal work in the approved session with run_task_session_turn. Full Access requires both administrator opt-ins; MCP flags cannot grant approval. Finish or revoke to release permissions. ' + (writesEnabled()
+const instructions = () => 'Propose Task Sessions for logged-in GUI approval, then continue normal work in the approved session with run_task_session_turn and its private executionCapability. Keep capabilities out of task instructions and logs; UUID knowledge alone never authorizes execution. Full Access requires both administrator opt-ins; MCP flags cannot grant approval. Finish or revoke to release permissions. ' + (writesEnabled()
   ? 'Purplemux development bridge. Before submitting work inspect list_codex_tabs, confirm the exact host/cwd and ask the user to approve the task. Tasks default to read-only; workspace writes require sandboxMode=workspace-write plus confirmWriteAccess=true. Never automatically accept Codex approval prompts. Poll taskId for completion.'
   : 'Read-only development status bridge. Task submission, interruption and approvals are disabled until the NUC operator explicitly opts in. Host SSH connectivity may not have been checked.');
 

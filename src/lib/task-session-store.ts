@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import type { TaskSession, TaskSessionAudit, TaskSessionTurn } from '@/types/task-session';
 
@@ -11,6 +11,7 @@ export class TaskSessionError extends Error {
   constructor(message: string, public readonly status = 400) { super(message); }
 }
 export const TASK_SESSION_MAX_TTL_MS = 24 * 60 * 60 * 1000;
+export const TASK_SESSION_LEASE_MS = 15000;
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,120}$/);
 // Reject common credential material instead of persisting it or echoing it in errors.
 const text = z.string().trim().min(1).max(2000).refine((s) =>
@@ -35,6 +36,9 @@ const turnSchema = z.object({
 const recordSchema = inputSchema.omit({ idempotencyKey: true, ttl: true }).extend({
   expiresAt: z.iso.datetime({ offset: true }),
   fullAccessWarningAcceptedAt: z.iso.datetime().optional(), executionState: z.enum(['idle', 'running', 'unknown', 'complete']).optional(),
+  ownerLease: z.object({ pid: z.number().int().positive(), processStart: z.string(), expiresAt: z.iso.datetime(), releasedAt: z.iso.datetime().optional() }).optional(),
+  targetFingerprint: z.string().optional(),
+  targetConnection: z.object({ address: z.string(), username: z.string(), port: z.number().int() }).optional(),
   ownerInstance: z.string().optional(), pinnedThreadId: z.string().optional(), turns: z.array(turnSchema).max(1000).optional(),
   id: z.uuid(), status: z.enum(['pending', 'approved', 'rejected', 'revoked', 'expired', 'completed']),
   source: z.enum(['gui', 'mcp']), createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
@@ -46,12 +50,40 @@ const auditSchema = z.object({
   actor: z.enum(['gui:user', 'mcp', 'system']), at: z.iso.datetime(),
 });
 const stateSchema = z.object({
+  capabilities: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)).default({}),
   version: z.literal(1), records: z.array(recordSchema).max(5000),
   audit: z.array(auditSchema).max(25000),
   keys: z.record(z.string(), z.object({ fingerprint: z.string(), taskId: z.uuid() })),
 });
 type State = z.infer<typeof stateSchema>;
 export type TaskSessionTargetValidator = (hostId: string, workdir: string, workspaceId?: string, tabId?: string) => Promise<void>;
+export type TaskSessionConnection = { fingerprint: string; connection?: { address: string; username: string; port: number } };
+class TaskSessionOwnerDead extends Error {}
+/** Linux boot + /proc start ticks prevent PID reuse from inheriting a lease. */
+const processIdentity = async (pid: number) => {
+  const [boot, stat] = await Promise.all([
+    fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8'), fs.readFile(`/proc/${pid}/stat`, 'utf8'),
+  ]);
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  if (fields[0] === 'Z') throw new TaskSessionOwnerDead();
+  if (!fields[19]) throw new Error('Process identity unavailable');
+  return boot.trim() + ':' + fields[19];
+};
+export const taskSessionConnection = async (hostId: string): Promise<TaskSessionConnection> => {
+  if (hostId === 'local') return { fingerprint: createHash('sha256').update('local').digest('hex') };
+  try {
+    const data = JSON.parse(await fs.readFile(path.join(os.homedir(), '.purplemux', 'hosts.json'), 'utf8'));
+    const host = data.hosts?.find((h: { id: string }) => h.id === hostId);
+    const connection = z.object({ address: z.string().trim().min(1), username: z.string().trim().min(1),
+      port: z.number().int().min(1).max(65535) }).parse(host);
+    // Exact trimmed values preserve SSH alias and username semantics. Port is explicit.
+    return { connection, fingerprint: connectionFingerprint(connection) };
+  } catch { throw new TaskSessionError('Host connection unavailable', 403); }
+};
+export const connectionFingerprint = (connection: { address: string; username: string; port: number }) =>
+  createHash('sha256').update(JSON.stringify({ address: connection.address.trim(), username: connection.username.trim(), port: connection.port })).digest('hex');
+const capabilityHash = (token: string) => createHash('sha256').update(token).digest('hex');
+export const validTaskCapability = (token: unknown): token is string => typeof token === 'string' && /^[A-Za-z0-9_-]{43}$/.test(token);
 
 /** Passive validation: read configuration only; never contact SSH or mutate a workspace. */
 export const validateTaskSessionTarget: TaskSessionTargetValidator = async (hostId, cwd, workspaceId, tabId) => {
@@ -87,7 +119,8 @@ export const validateTaskSessionTarget: TaskSessionTargetValidator = async (host
 
 export class TaskSessionStore {
   constructor(private readonly directory: string, private readonly validateTarget: TaskSessionTargetValidator,
-    private readonly clock = Date.now, private readonly instance: string = TASK_SESSION_INSTANCE) {}
+    private readonly clock = Date.now, private readonly instance: string = TASK_SESSION_INSTANCE,
+    private readonly connection = taskSessionConnection) {}
 
   private async transaction<T>(fn: (state: State) => Promise<T>): Promise<T> {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -112,15 +145,14 @@ export class TaskSessionStore {
         finally { await handle.close(); }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new TaskSessionError('Storage unavailable', 503);
-        state = { version: 1, records: [], audit: [], keys: {} };
+        state = { version: 1, records: [], audit: [], keys: {}, capabilities: {} };
       }
       for (const record of state.records) {
-        if (record.status === 'approved' && record.ownerInstance && record.ownerInstance !== this.instance) {
-          record.executionState = 'unknown';
-          this.transition(state, record, 'revoked', 'system');
-        }
         if (['pending', 'approved'].includes(record.status) && Date.parse(record.expiresAt) <= this.clock()) {
           this.transition(state, record, 'expired', 'system');
+        } else if (record.status === 'approved' && record.ownerInstance && !(await this.liveLease(record))) {
+          record.executionState = 'unknown';
+          this.transition(state, record, 'revoked', 'system');
         }
       }
       // Persist expiry even if the requested operation fails.
@@ -142,6 +174,84 @@ export class TaskSessionStore {
     }
   }
 
+  private async liveOwner(record: TaskSession) {
+    const lease = record.ownerLease;
+    if (!lease || lease.releasedAt) return false;
+    try { return await processIdentity(lease.pid) === lease.processStart; } catch { return false; }
+  }
+  private async liveLease(record: TaskSession) {
+    return !!record.ownerLease && Date.parse(record.ownerLease.expiresAt) > this.clock() && await this.liveOwner(record);
+  }
+  private async blocksTab(record: TaskSession) {
+    // Never steal from an expired or unobservable owner that may still run a child.
+    if (!record.ownerInstance || record.ownerLease?.releasedAt) return false;
+    if (record.status === 'approved' || !record.ownerLease) return true;
+    const lease = record.ownerLease;
+    try { return await processIdentity(lease.pid) === lease.processStart; }
+    catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      // Only positively observed death/reuse clears the barrier without owner acknowledgement.
+      return !(error instanceof TaskSessionOwnerDead ||
+        (failure.code === 'ENOENT' && failure.path === `/proc/${lease.pid}/stat`));
+    }
+  }
+  async acknowledgeOwnerRelease(taskId: string) {
+    return this.transaction(async (s) => {
+      const record = s.records.find((r) => r.id === taskId);
+      if (!record || record.ownerInstance !== this.instance || !record.ownerLease || record.status === 'approved') return;
+      record.ownerLease.releasedAt = new Date(this.clock()).toISOString();
+    });
+  }
+
+  private checkCapability(state: State, taskId: string, token?: string) {
+    const expected = state.capabilities[taskId];
+    if (!expected || !validTaskCapability(token) || !timingSafeEqual(Buffer.from(expected), Buffer.from(capabilityHash(token)))) {
+      throw new TaskSessionError('Task execution capability required', 403);
+    }
+  }
+  async requireCapability(taskId: string, token?: string) {
+    return this.transaction(async (state) => { this.checkCapability(state, taskId, token); });
+  }
+
+  private async validateBinding(record: TaskSession) {
+    await this.validateTarget(record.hostId, record.workdir, record.workspaceId, record.tabId);
+    const binding = await this.connection(record.hostId);
+    if (!record.targetFingerprint || record.targetFingerprint !== binding.fingerprint) {
+      throw new TaskSessionError('Target connection changed or legacy binding missing; propose a new session', 403);
+    }
+  }
+
+  /** Hold the same interprocess lock as reservations across runtime creation / GUI mutations. */
+  async withTabAccess<T>(workspaceId: string, tabId: string, allowOwner: boolean, operation: () => Promise<T>): Promise<T> {
+    return this.transaction(async (s) => {
+      const candidate = s.records.filter((r) => r.workspaceId === workspaceId && r.tabId === tabId);
+      const blocking = await Promise.all(candidate.map((r) => this.blocksTab(r)));
+      if (candidate.some((r, i) => blocking[i] && (r.status !== 'approved' || !allowOwner || r.ownerInstance !== this.instance))) {
+        throw new TaskSessionError('Tab has an active Task Session lease', 409);
+      }
+      return operation();
+    });
+  }
+
+  /** Heartbeat also validates idle pinned sessions; readers cannot renew another owner's lease. */
+  async heartbeat(taskId: string) {
+    return this.transaction(async (s) => {
+      const record = s.records.find((r) => r.id === taskId);
+      if (!record || record.status !== 'approved' || record.ownerInstance !== this.instance || !record.ownerLease) throw new TaskSessionError('Session lease lost', 409);
+      try {
+        if (!fullAccessEnabled()) throw new TaskSessionError('Full Access execution disabled', 403);
+        await this.validateBinding(record);
+        if (Date.parse(record.expiresAt) <= this.clock()) throw new TaskSessionError('Task session expired', 403);
+        if (!(await this.liveLease(record))) throw new TaskSessionError('Session lease expired during validation', 409);
+        record.ownerLease.expiresAt = new Date(this.clock() + TASK_SESSION_LEASE_MS).toISOString();
+      } catch (error) {
+        this.transition(s, record, 'revoked', 'system');
+        throw error;
+      }
+      return record;
+    });
+  }
+
   private transition(state: State, record: TaskSession, event: TaskSession['status'], actor: TaskSessionAudit['actor']) {
     record.status = event;
     record.updatedAt = new Date(this.clock()).toISOString();
@@ -157,10 +267,12 @@ export class TaskSessionStore {
     state.audit.push({ id: randomUUID(), taskId: record.id, event, actor, at: record.updatedAt });
   }
 
-  async propose(input: unknown, source: 'gui' | 'mcp'): Promise<TaskSession> {
+  async propose(input: unknown, source: 'gui' | 'mcp', capability?: string): Promise<TaskSession> {
+    if (capability !== undefined && !validTaskCapability(capability)) throw new TaskSessionError('Invalid execution capability');
     const parsed = inputSchema.safeParse(input);
     if (!parsed.success) throw new TaskSessionError('Invalid task session input (unknown fields or credential material are forbidden)');
     const { idempotencyKey, ...fields } = parsed.data;
+    if (capability && (fields.purpose.includes(capability) || fields.scope.includes(capability))) throw new TaskSessionError('Execution capability must not appear in task text');
     if ((!fields.expiresAt && fields.ttl === undefined) || (fields.expiresAt && fields.ttl !== undefined)) throw new TaskSessionError('Specify expiresAt or ttl');
     if ([fields.workspaceId, fields.tabId, fields.requestedPermissions].some(Boolean) &&
         ![fields.workspaceId, fields.tabId, fields.requestedPermissions].every(Boolean)) throw new TaskSessionError('workspaceId, tabId and requestedPermissions are required together');
@@ -173,6 +285,7 @@ export class TaskSessionStore {
       const previous = state.keys[key];
       if (previous) {
         if (previous.fingerprint !== fingerprint) throw new TaskSessionError('Idempotency key conflicts with an earlier request', 409);
+        if (state.capabilities[previous.taskId]) this.checkCapability(state, previous.taskId, capability);
         return state.records.find((r) => r.id === previous.taskId)!;
       }
       const ttl = Date.parse(normalized.expiresAt) - this.clock();
@@ -180,13 +293,15 @@ export class TaskSessionStore {
       await this.validateTarget(normalized.hostId, normalized.workdir, normalized.workspaceId, normalized.tabId);
       if (Object.keys(state.keys).length >= 10000) throw new TaskSessionError('Record capacity reached', 409);
       if (Date.parse(normalized.expiresAt) <= this.clock()) throw new TaskSessionError('Task session expired', 409);
-      const duplicate = state.records.find((r) => r.source === source && ['pending', 'approved'].includes(r.status) &&
+      const duplicate = capability ? undefined : state.records.find((r) => r.source === source && ['pending', 'approved'].includes(r.status) &&
         createHash('sha256').update(JSON.stringify({ purpose: r.purpose, hostId: r.hostId, workdir: r.workdir, scope: r.scope, expiresAt: r.expiresAt, ...(r.workspaceId ? { workspaceId: r.workspaceId, tabId: r.tabId, requestedPermissions: r.requestedPermissions } : {}) })).digest('hex') === fingerprint);
       if (duplicate) { state.keys[key] = { fingerprint, taskId: duplicate.id }; return duplicate; }
       if (state.records.length >= 5000) throw new TaskSessionError('Record capacity reached', 409);
       const now = new Date(this.clock()).toISOString();
-      const record: TaskSession = { ...normalized, id: randomUUID(), source, status: 'pending', createdAt: now, updatedAt: now };
+      const binding = await this.connection(normalized.hostId);
+      const record: TaskSession = { targetFingerprint: binding.fingerprint, ...(binding.connection ? { targetConnection: binding.connection } : {}), ...normalized, id: randomUUID(), source, status: 'pending', createdAt: now, updatedAt: now };
       state.records.push(record);
+      if (capability) state.capabilities[record.id] = capabilityHash(capability);
       state.keys[key] = { fingerprint, taskId: record.id };
       this.transition(state, record, 'pending', source === 'mcp' ? 'mcp' : 'gui:user');
       return record;
@@ -223,7 +338,7 @@ export class TaskSessionStore {
       const allowed = record.status === 'pending' ? ['approved', 'rejected', 'revoked'] : record.status === 'approved' ? ['revoked'] : [];
       if (!allowed.includes(String(action))) throw new TaskSessionError('Task session cannot make this transition', 409);
       if (action === 'approved') {
-        await this.validateTarget(record.hostId, record.workdir, record.workspaceId, record.tabId);
+        await this.validateBinding(record);
         if (record.requestedPermissions === 'full-access') {
           if (!warningAccepted) throw new TaskSessionError('Full Access GUI warning confirmation required');
           record.fullAccessWarningAcceptedAt = new Date(this.clock()).toISOString();
@@ -238,7 +353,7 @@ export class TaskSessionStore {
       return record;
     });
   }
-  private async checkExecution(record: TaskSession, target: { hostId: string; workdir: string; workspaceId: string; tabId: string }) {
+  private async checkExecution(state: State, record: TaskSession, target: { hostId: string; workdir: string; workspaceId: string; tabId: string }) {
     if (!fullAccessEnabled()) throw new TaskSessionError('Full Access execution disabled: both administrator opt-in flags are required', 403);
     if (record.status !== 'approved' || Date.parse(record.expiresAt) <= this.clock()) throw new TaskSessionError('An unexpired GUI-approved Task Session is required', 403);
     if (!record.sessionId || !record.fullAccessWarningAcceptedAt || record.requestedPermissions !== 'full-access' || !record.workspaceId || !record.tabId) {
@@ -247,29 +362,37 @@ export class TaskSessionStore {
     if (record.hostId !== target.hostId || record.workdir !== target.workdir || record.workspaceId !== target.workspaceId || record.tabId !== target.tabId) {
       throw new TaskSessionError('Host/cwd/workspace/tab mismatch', 409);
     }
-    await this.validateTarget(record.hostId, record.workdir, record.workspaceId, record.tabId);
+    try { await this.validateBinding(record); } catch {
+      this.transition(state, record, 'revoked', 'system');
+      throw new TaskSessionError('Target connection or workspace binding changed; propose a new session', 403);
+    }
     if (Date.parse(record.expiresAt) <= this.clock()) throw new TaskSessionError('Task session expired', 403);
   }
 
-  async beginTurn(taskId: string, target: { hostId: string; workdir: string; workspaceId: string; tabId: string }, instruction: string, key: string) {
-    if (!z.uuid().safeParse(taskId).success || !id.safeParse(key).success || !instruction.trim() || instruction.length > 16000) throw new TaskSessionError('Invalid turn request');
+  async beginTurn(taskId: string, target: { hostId: string; workdir: string; workspaceId: string; tabId: string }, instruction: string, key: string, capability?: string) {
+    if (!z.uuid().safeParse(taskId).success || !id.safeParse(key).success || !instruction.trim() || instruction.length > 16000 || (capability && instruction.includes(capability))) throw new TaskSessionError('Invalid turn request');
     const hash = createHash('sha256').update(instruction).digest('hex');
     const keyHash = createHash('sha256').update(key).digest('hex');
     return this.transaction(async (s) => {
       const record = s.records.find((r) => r.id === taskId);
       if (!record) throw new TaskSessionError('Task session not found', 404);
-      await this.checkExecution(record, target);
+      await this.checkExecution(s, record, target);
+      this.checkCapability(s, taskId, capability);
+      if (record.ownerInstance && record.ownerInstance !== this.instance) throw new TaskSessionError('Task session owned by another worker', 409);
       const previous = record.turns?.find((t) => t.keyHash === keyHash);
       if (previous) {
         if (previous.instructionHash !== hash) throw new TaskSessionError('Idempotency key conflict', 409);
         return { record, turn: previous, existing: true };
       }
-      if (record.executionState === 'running' || s.records.some((r) => r.id !== taskId && r.status === 'approved' && r.ownerInstance && r.workspaceId === target.workspaceId && r.tabId === target.tabId)) throw new TaskSessionError('Tab already has an active lease or turn', 409);
+      const otherOwners = s.records.filter((r) => r.id !== taskId && r.workspaceId === target.workspaceId && r.tabId === target.tabId);
+      if (record.executionState === 'running' || (await Promise.all(otherOwners.map((r) => this.blocksTab(r)))).some(Boolean)) throw new TaskSessionError('Tab already has an active lease or turn', 409);
       if ((record.turns?.length || 0) >= 1000 || s.audit.length >= 24900) throw new TaskSessionError('Audit capacity reached', 409);
       const turn: TaskSessionTurn = { id: randomUUID(), keyHash, instructionHash: hash,
         instructionPreview: '[instruction omitted; SHA-256 only]', startedAt: new Date(this.clock()).toISOString(), result: 'running' };
+      const processStart = await processIdentity(process.pid);
       (record.turns ||= []).push(turn);
       record.executionState = 'running'; record.ownerInstance = this.instance;
+      record.ownerLease = { pid: process.pid, processStart, expiresAt: new Date(this.clock() + TASK_SESSION_LEASE_MS).toISOString() };
       s.audit.push({ id: randomUUID(), taskId, event: 'turn-started', actor: 'mcp', at: turn.startedAt, instructionHash: hash, turnId: turn.id });
       return { record, turn, existing: false };
     });
@@ -279,8 +402,13 @@ export class TaskSessionStore {
     return this.transaction(async (s) => {
       const record = s.records.find((r) => r.id === taskId);
       if (!record) throw new TaskSessionError('Task session not found', 404);
-      await this.checkExecution(record, target);
+      await this.checkExecution(s, record, target);
       if (record.ownerInstance !== this.instance || record.executionState !== 'running' || record.turns?.at(-1)?.id !== turnId) throw new TaskSessionError('Turn reservation lost', 409);
+      if (!(await this.liveLease(record))) {
+        this.transition(s, record, 'revoked', 'system');
+        throw new TaskSessionError('Turn lease expired during validation', 409);
+      }
+      record.ownerLease!.expiresAt = new Date(this.clock() + TASK_SESSION_LEASE_MS).toISOString();
       return record;
     });
   }
@@ -300,6 +428,7 @@ export class TaskSessionStore {
       const r = s.records.find((r) => r.id === taskId)!;
       const t = r?.turns?.find((t) => t.id === id);
       if (!t || t.result !== 'running') return;
+      if (r.ownerInstance !== this.instance) throw new TaskSessionError('Turn owned by another worker', 409);
       t.result = result; t.finishedAt = new Date(this.clock()).toISOString();
       r.executionState = result === 'completed' && r.status === 'approved' ? 'idle' : 'unknown';
       s.audit.push({ id: randomUUID(), taskId, event: result === 'completed' ? 'turn-completed' : 'turn-failed', actor: 'system', at: t.finishedAt,

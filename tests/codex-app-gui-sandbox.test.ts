@@ -488,7 +488,7 @@ describe('Codex approval decisions', () => {
 });
 
 describe('GUI-approved long-lived Task Session lease', () => {
-  const session = () => ({ sessionId: 'session-approved', expiresAt: new Date(Date.now() + 60000).toISOString(),
+  const session = () => ({ targetFingerprint: '25bf8e1a2393f1108d37029b3df5593236c755742ec93465bbafa9b290bddcf6', sessionId: 'session-approved', expiresAt: new Date(Date.now() + 60000).toISOString(),
     text: 'Build approved repo', directory: cwd, hostId: 'local', workspaceId: workspace.id, tabId: tab.id,
     validate: vi.fn(async () => {}), onLost: vi.fn() });
   const optIn = () => { vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1'); };
@@ -502,6 +502,12 @@ describe('GUI-approved long-lived Task Session lease', () => {
       return {};
     });
   };
+  it('rejects a cached App Server whose connection fingerprint differs from the approval', async () => {
+    optIn(); const { runtime, rpc } = setup('read-only');
+    await expect(runtime.runTaskSessionTurn({ ...session(), targetFingerprint: 'changed-remote-target' })).rejects.toThrow('target connection changed');
+    expect(rpc).not.toHaveBeenCalled();
+    runtime.terminate();
+  });
   it('runs multiple turns in one pinned thread, blocks manual GUI actions and preserves durable settings', async () => {
     optIn(); const { runtime, internal, rpc } = setup('read-only', threadB); confirmed(rpc);
     vi.mocked(internal.store).mockRestore(); const options = session();

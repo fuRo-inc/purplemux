@@ -6,6 +6,7 @@ import { resolveCodexAppTab } from '@/lib/codex-app-tab';
 import { getCodexGuiRuntime, getLoadedCodexGuiRuntime, type CodexGuiRuntime } from '@/lib/codex-app-gui';
 
 const targetSchema = z.object({
+  executionCapability: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   taskId: z.uuid(), hostId: z.string(), workdir: z.string(), workspaceId: z.string(), tabId: z.string(),
   instruction: z.string().trim().min(1).max(16000), idempotencyKey: z.string().regex(/^[a-zA-Z0-9_-]{1,120}$/),
 }).strict();
@@ -19,6 +20,7 @@ export const releaseTaskSession = async (taskId: string) => {
     // Delete first so callbacks from interruption cannot resurrect this session.
     active.delete(taskId); clearInterval(lease.timer); lease.unsubscribe();
     await lease.runtime.finishTaskSession(lease.sessionId);
+    await taskSessions.acknowledgeOwnerRelease(taskId);
     return;
   }
   // Also handle setup between durable reservation and listener registration.
@@ -26,6 +28,7 @@ export const releaseTaskSession = async (taskId: string) => {
   if (record.workspaceId && record.tabId && record.sessionId) {
     const runtime = await getLoadedCodexGuiRuntime(record.workspaceId, record.tabId);
     await runtime?.finishTaskSession(record.sessionId);
+    await taskSessions.acknowledgeOwnerRelease(taskId);
   }
 };
 
@@ -40,7 +43,7 @@ export const runTaskSessionTurn = async (input: unknown) => {
   const parsed = targetSchema.safeParse(input);
   if (!parsed.success) throw new TaskSessionError('Invalid turn request');
   const args = parsed.data;
-  const reserved = await taskSessions.beginTurn(args.taskId, args, args.instruction, args.idempotencyKey);
+  const reserved = await taskSessions.beginTurn(args.taskId, args, args.instruction, args.idempotencyKey, args.executionCapability);
   if (reserved.existing) return { taskId: args.taskId, turn: reserved.turn, existing: true };
   void executeTurn(args, reserved.record, reserved.turn).catch(() => {});
   return { taskId: args.taskId, turn: reserved.turn, existing: false };
@@ -51,19 +54,22 @@ const executeTurn = async (args: z.infer<typeof targetSchema>, record: TaskSessi
   let runtime: CodexGuiRuntime | undefined;
   let lost = false;
   const onLost = () => {
+    if (lost) return;
     lost = true;
+    // Lost thread/runtime authority must not leave an elevated child running.
+    if (runtime?.snapshot().running && runtime.snapshot().taskPermissionsActive) runtime.terminate();
     const lease = active.get(record.id);
     if (lease) { active.delete(record.id); clearInterval(lease.timer); lease.unsubscribe(); }
     const result = runtime?.snapshot().lastTurnStatus === 'failed' ? 'failed' : 'unknown';
-    void taskSessions.settleTurn(record.id, turn.id, result).then(() => taskSessions.finish(record.id, true)).catch(() => {});
+    void taskSessions.settleTurn(record.id, turn.id, result).then(() => taskSessions.finish(record.id, true)).then(() => releaseTaskSession(record.id)).catch(() => {});
   };
   try {
     const { workspace, tab } = await resolveCodexAppTab(args.workspaceId, args.tabId);
     await validate();
     runtime = await getCodexGuiRuntime(workspace, tab);
     const instruction = `Approved development task: ${record.purpose}\nScope: ${record.scope}\nTarget: ${record.hostId}:${record.workdir}\nContinue normal work within this approved task. Do not perform unrelated deletion or substantial operations on other devices. Scope is an instruction, not an OS sandbox.\n\n${args.instruction}`;
-    const state = await runtime.runTaskSessionTurn({ ...args, directory: args.workdir, text: instruction, sessionId: record.sessionId!,
-      expiresAt: record.expiresAt, pinnedThreadId: record.pinnedThreadId, validate, onLost });
+    const state = await runtime.runTaskSessionTurn({ hostId: args.hostId, workspaceId: args.workspaceId, tabId: args.tabId, directory: args.workdir, text: instruction, sessionId: record.sessionId!,
+      targetFingerprint: record.targetFingerprint!, expiresAt: record.expiresAt, pinnedThreadId: record.pinnedThreadId, validate, onLost });
     if (lost || !state.running || !state.threadId || !(state.turnId || state.lastTurnId)) throw new TaskSessionError('Session runtime lost', 409);
     await taskSessions.bindTurn(record.id, turn.id, state.threadId, (state.turnId || state.lastTurnId)!);
     // Replace the previous turn listener, retaining the runtime's long-lived lease.
@@ -79,6 +85,7 @@ const executeTurn = async (args: z.infer<typeof targetSchema>, record: TaskSessi
         if (latest.status !== 'approved' || !fullAccessEnabled()) {
           await taskSessions.finish(record.id, true); await releaseTaskSession(record.id); return;
         }
+        await taskSessions.heartbeat(record.id);
         const live = runtime.snapshot();
         if (!live.running || live.threadId !== state.threadId || !live.taskPermissionsActive) { onLost(); return; }
         const expectedTurn = state.turnId || state.lastTurnId;

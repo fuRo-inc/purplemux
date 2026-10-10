@@ -16,6 +16,7 @@ vi.mock('@/lib/task-session-store', async (original) => {
 });
 vi.mock('@/lib/codex-app-tab', () => ({ resolveCodexAppTab: fixture.resolve }));
 vi.mock('@/lib/codex-app-gui', () => ({ getCodexGuiRuntime: vi.fn(async () => fixture.runtime), getLoadedCodexGuiRuntime: vi.fn(async () => fixture.runtime) }));
+import { dispatchTaskSessionMcp } from '@/lib/mcp-task-sessions';
 import { runTaskSessionTurn, finishTaskSession, getTaskSession } from '@/lib/task-session-runtime';
 
 let dir: string;
@@ -24,6 +25,7 @@ let live: CodexGuiState;
 let listeners: ((state: CodexGuiState) => void)[];
 let lost: (() => void) | undefined;
 let run: ReturnType<typeof vi.fn>;
+const capability = 'A'.repeat(43);
 const target = { hostId: 'local', workdir: '/tmp/project', workspaceId: 'ws', tabId: 'tab' };
 const tick = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 3)); };
 const waitFor = async (predicate: () => Promise<boolean>) => {
@@ -31,7 +33,7 @@ const waitFor = async (predicate: () => Promise<boolean>) => {
   throw new Error('Mock coordinator did not settle');
 };
 const detail = () => fixture.store.detail(id);
-const args = (key = 'turn1') => ({ taskId: id, ...target, instruction: 'Build and analyze', idempotencyKey: key });
+const args = (key = 'turn1') => ({ executionCapability: capability, taskId: id, ...target, instruction: 'Build and analyze', idempotencyKey: key });
 beforeEach(async () => {
   vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1');
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-session-runtime-'));
@@ -51,7 +53,7 @@ beforeEach(async () => {
     subscribe: (listener: (s: CodexGuiState) => void) => { listeners.push(listener); listener(live); return () => { listeners = listeners.filter((l) => l !== listener); }; },
     finishTaskSession: vi.fn(async () => { live.taskPermissionsActive = false; live.busy = false; lost?.(); }),
     terminate: vi.fn(() => { live.running = false; live.taskPermissionsActive = false; lost?.(); }) };
-  const r = await fixture.store.propose({ ...target, purpose: 'Develop runtime', scope: 'Repo only', requestedPermissions: 'full-access', ttl: 3600, idempotencyKey: 'proposal' }, 'mcp');
+  const r = await fixture.store.propose({ ...target, purpose: 'Develop runtime', scope: 'Repo only', requestedPermissions: 'full-access', ttl: 3600, idempotencyKey: 'proposal' }, 'mcp', capability);
   id = r.id;
 });
 afterEach(async () => {
@@ -61,6 +63,39 @@ const approve = () => fixture.store.decide(id, 'approved', 'pending', true);
 const complete = () => { live.lastTurnId = live.turnId; live.turnId = null; live.lastTurnStatus = 'completed'; live.busy = false; listeners.forEach((l) => l(live)); };
 
 describe('MCP turn coordinator with durable store and mock Codex', () => {
+  it('issues a private proposal capability and recovers only with that capability', async () => {
+    const proposal = { ...target, purpose: 'New capability task', scope: 'Repo only', requestedPermissions: 'full-access', ttl: 3600, idempotencyKey: 'cap-proposal' };
+    const first = await dispatchTaskSessionMcp('propose_task_session', proposal) as { id: string; executionCapability: string };
+    expect(first.executionCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    await expect(dispatchTaskSessionMcp('propose_task_session', proposal)).rejects.toThrow('capability required');
+    const recovered = await dispatchTaskSessionMcp('propose_task_session', { ...proposal, executionCapability: first.executionCapability });
+    expect(recovered).toMatchObject({ id: first.id, executionCapability: first.executionCapability });
+    expect(JSON.stringify(await dispatchTaskSessionMcp('list_task_sessions', {}))).not.toContain(first.executionCapability);
+    expect(JSON.stringify(await dispatchTaskSessionMcp('get_task_session', { taskId: first.id }))).not.toContain(first.executionCapability);
+  });
+  it('requires a private capability for execution, finish/revoke and live output; never passes it to Codex', async () => {
+    await approve();
+    await expect(dispatchTaskSessionMcp('run_task_session_turn', { ...args(), executionCapability: 'B'.repeat(43) })).rejects.toThrow('capability required');
+    await expect(dispatchTaskSessionMcp('finish_task_session', { taskId: id })).rejects.toThrow('Invalid finish');
+    await expect(dispatchTaskSessionMcp('finish_task_session', { taskId: id, revoke: true, executionCapability: 'B'.repeat(43) })).rejects.toThrow('capability required');
+    await expect(dispatchTaskSessionMcp('get_task_session', { taskId: id, includeOutput: true })).rejects.toThrow('capability required');
+    expect(run).not.toHaveBeenCalled(); expect((await detail()).record.status).toBe('approved');
+    await dispatchTaskSessionMcp('run_task_session_turn', args());
+    await waitFor(async () => !!(await detail()).record.turns?.[0].turnId);
+    expect(run.mock.calls[0][0]).not.toHaveProperty('executionCapability');
+    expect(JSON.stringify(run.mock.calls[0][0])).not.toContain(capability);
+    await dispatchTaskSessionMcp('finish_task_session', { taskId: id, executionCapability: capability });
+    expect((await detail()).record.status).toBe('completed');
+  });
+  it('observes revoke by an independent GUI worker through the owner watch', async () => {
+    await approve(); await runTaskSessionTurn(args()); await waitFor(async () => !!(await detail()).record.turns?.[0].turnId);
+    const reader = new TaskSessionStore(dir, async () => {}, Date.now, 'gui-other-worker');
+    expect((await reader.list())[0].status).toBe('approved');
+    await reader.decide(id, 'revoked', 'approved');
+    // No runtime notification: exercise the periodic file watch itself.
+    await new Promise((r) => setTimeout(r, 1200)); expect(live.taskPermissionsActive).toBe(false);
+    expect((await detail()).record.status).toBe('revoked');
+  });
   it('rejects an SSH host removed from the registry even if its tab remains configured', async () => {
     fixture.resolve.mockResolvedValueOnce({ workspace: { id: 'ws', hostId: 'removed', remoteDirectory: '/tmp/project' }, tab: { id: 'tab' } });
     const read = vi.spyOn(fs, 'readFile').mockResolvedValueOnce('{"hosts": []}');

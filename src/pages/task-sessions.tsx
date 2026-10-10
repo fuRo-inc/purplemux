@@ -102,7 +102,7 @@ export default function TaskSessionsPage() {
       </div>
       {records.length === 0 && <p>申請はありません。</p>}
       {records.map((record) => <button className="block w-full rounded border p-3 text-left" key={record.id} onClick={() => void detail(record.id)}>
-        {labels[record.status]} — {record.purpose}<br />{record.hostId}: {record.workdir}<br />Workspace: {record.workspaceId || "旧記録"} / Tab: {record.tabId || "未指定"}<br />権限: {record.requestedPermissions || "実行不可"} / 実行: {record.executionState || "未開始"}<br />範囲: {record.scope}<br />期限: {record.expiresAt}
+        {labels[record.status]} — {record.purpose}<br />{record.hostId}: {record.workdir}<br />接続先: {record.targetConnection ? `${record.targetConnection.username}@${record.targetConnection.address}:${record.targetConnection.port}` : record.hostId === 'local' ? 'local' : '旧記録・実行不可'}<br />Workspace: {record.workspaceId || "旧記録"} / Tab: {record.tabId || "未指定"}<br />権限: {record.requestedPermissions || "実行不可"} / 実行: {record.executionState || "未開始"}<br />範囲: {record.scope}<br />期限: {record.expiresAt}
       </button>)}
     </section>
     {selected && <section className="space-y-3 rounded border p-4">

@@ -3,7 +3,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import { promises as fs } from 'fs';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { getRemoteHost } from '@/lib/remote-host-store';
 import type { IWorkspace, ITab } from '@/types/terminal';
 
@@ -113,6 +113,7 @@ export class CodexGuiRuntime {
   private actions: Promise<unknown> = Promise.resolve();
   private taskTurnId: string | null = null;
   private earlyTaskCompletions = new Map<string, Json>();
+  private executionTargetFingerprint = createHash('sha256').update('local').digest('hex');
   private sessionLease: {
     sessionId: string; expiresAt: string; threadId: string | null;
     validate: () => Promise<void>; onLost: () => void; timer: ReturnType<typeof setTimeout>;
@@ -450,6 +451,8 @@ export class CodexGuiRuntime {
           !Number.isInteger(host.port) || host.port < 1 || host.port > 65535) {
         throw new Error('Invalid remote SSH configuration');
       }
+      const { connectionFingerprint } = await import('@/lib/task-session-store');
+      this.executionTargetFingerprint = connectionFingerprint(host);
       command = 'ssh';
       // Interactive shell loads fnm/npm PATH; -T preserves clean JSON stdout.
       args = ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
@@ -798,13 +801,14 @@ export class CodexGuiRuntime {
 
   /** Only the durable, GUI-approved Task Session coordinator calls this entry point. */
   async runTaskSessionTurn(options: {
-    sessionId: string; expiresAt: string; text: string; directory: string; hostId: string;
+    targetFingerprint: string; sessionId: string; expiresAt: string; text: string; directory: string; hostId: string;
     workspaceId: string; tabId: string; pinnedThreadId?: string;
     validate: () => Promise<void>; onLost: () => void;
   }): Promise<CodexGuiState> {
     return this.serialize(async () => {
       if (process.env.PURPLEMUX_MCP_ALLOW_WRITES !== '1' || process.env.PURPLEMUX_MCP_ALLOW_FULL_ACCESS !== '1') throw new Error('Full Access execution disabled');
       await options.validate();
+      if (options.targetFingerprint !== this.executionTargetFingerprint) throw new Error('Runtime target connection changed; new App Server required');
       if (this.closed || !this.state.ready || this.state.busy || this.state.approvals.length ||
           options.workspaceId !== this.workspace.id || options.tabId !== this.tab.id ||
           options.hostId !== this.executionHostId || this.getWorkspaceCwd() !== options.directory ||
@@ -1079,6 +1083,11 @@ export class CodexGuiRuntime {
 }
 
 export const getCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Promise<CodexGuiRuntime> => {
+  const { taskSessions } = await import('@/lib/task-session-store');
+  return taskSessions.withTabAccess(workspace.id, tab.id, true, () => loadCodexGuiRuntime(workspace, tab));
+};
+
+const loadCodexGuiRuntime = async (workspace: IWorkspace, tab: ITab): Promise<CodexGuiRuntime> => {
   const key = workspace.id + ':' + tab.id;
   const existing = runtimes.get(key);
   if (existing) {
