@@ -493,11 +493,20 @@ describe('GUI-approved long-lived Task Session lease', () => {
     validate: vi.fn(async () => {}), onLost: vi.fn() });
   const optIn = () => { vi.stubEnv('PURPLEMUX_MCP_ALLOW_WRITES', '1'); vi.stubEnv('PURPLEMUX_MCP_ALLOW_FULL_ACCESS', '1'); };
   afterEach(() => vi.unstubAllEnvs());
-  const confirmed = (rpc: ReturnType<typeof setup>['rpc']) => {
+  const confirmed = (rpc: ReturnType<typeof setup>['rpc'], internal: RuntimeInternal) => {
     let turn = 0;
     rpc.mockImplementation(async (method, params) => {
-      if (method === 'thread/start') return { thread: { id: threadA, cwd } };
-      if (method === 'thread/settings/update') return { sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy };
+      if (method === 'thread/start') return {
+        thread: { id: threadA, cwd }, sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
+      };
+      if (method === 'thread/settings/update') {
+        queueMicrotask(() => internal.handleNotification('thread/settings/updated', {
+          threadId: params.threadId, threadSettings: {
+            sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy,
+          },
+        }));
+        return {};
+      }
       if (method === 'turn/start') return { turn: { id: 'session-turn-' + ++turn } };
       return {};
     });
@@ -509,7 +518,7 @@ describe('GUI-approved long-lived Task Session lease', () => {
     runtime.terminate();
   });
   it('runs multiple turns in one pinned thread, blocks manual GUI actions and preserves durable settings', async () => {
-    optIn(); const { runtime, internal, rpc } = setup('read-only', threadB); confirmed(rpc);
+    optIn(); const { runtime, internal, rpc } = setup('read-only', threadB); confirmed(rpc, internal);
     vi.mocked(internal.store).mockRestore(); const options = session();
     await runtime.runTaskSessionTurn(options);
     expect(savedSettings()).toMatchObject({ sandboxMode: 'read-only', approvalPolicy: 'on-request' });
@@ -535,9 +544,11 @@ describe('GUI-approved long-lived Task Session lease', () => {
   it.each(['reject', 'missing', 'wrong'])('fails closed when effective settings confirmation is %s', async (failure) => {
     optIn(); const { runtime, rpc } = setup('read-only'); const options = session();
     rpc.mockImplementation(async (method) => {
-      if (method === 'thread/start') return { thread: { id: threadA, cwd } };
+      if (method === 'thread/start') return {
+        thread: { id: threadA, cwd }, sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never',
+      };
       if (failure === 'reject') throw new Error('RPC timeout');
-      return failure === 'wrong' ? { sandboxPolicy: { type: 'workspaceWrite' }, approvalPolicy: 'on-request' } : {};
+      return {};
     });
     await expect(runtime.runTaskSessionTurn(options)).rejects.toThrow();
     expect(rpc.mock.calls.some(([m]) => m === 'turn/start')).toBe(false);
@@ -545,7 +556,7 @@ describe('GUI-approved long-lived Task Session lease', () => {
     expect(options.onLost).toHaveBeenCalledOnce();
   });
   it('checks durable approval again after settings confirmation and before turn/start', async () => {
-    optIn(); const { runtime, rpc } = setup('read-only'); confirmed(rpc); const options = session();
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
     options.validate.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Revoked during setup'));
     await expect(runtime.runTaskSessionTurn(options)).rejects.toThrow('Revoked');
     expect(rpc.mock.calls.some(([m]) => m === 'turn/start')).toBe(false);
@@ -559,7 +570,7 @@ describe('GUI-approved long-lived Task Session lease', () => {
     expect(rpc).not.toHaveBeenCalled(); runtime.terminate();
   });
   it('interrupts and disconnects a running lease on finish, restoring local permissions', async () => {
-    optIn(); const { runtime, rpc } = setup('read-only'); confirmed(rpc); const options = session();
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
     await runtime.runTaskSessionTurn(options); await runtime.finishTaskSession(options.sessionId);
     expect(rpc.mock.calls.some(([m]) => m === 'turn/interrupt')).toBe(true);
     expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
@@ -575,8 +586,15 @@ describe('GUI-approved long-lived Task Session lease', () => {
         internal.handleNotification('turn/started', { threadId: threadA, turn: { id: 'pending-turn' } });
         started(); return; // No turn/start response; use the actual pending RPC map.
       }
-      const result = message.method === 'thread/start' ? { thread: { id: threadA, cwd } }
-        : message.method === 'thread/settings/update' ? { sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy } : {};
+      const result = message.method === 'thread/start' ? { thread: { id: threadA, cwd }, sandbox: { type: 'dangerFullAccess' }, approvalPolicy: 'never' }
+        : message.method === 'thread/settings/update' ? {} : {};
+      if (message.method === 'thread/settings/update') {
+        queueMicrotask(() => internal.handleNotification('thread/settings/updated', {
+          threadId: params.threadId, threadSettings: {
+            sandboxPolicy: params.sandboxPolicy, approvalPolicy: params.approvalPolicy,
+          },
+        }));
+      }
       internal.handleLine(JSON.stringify({ id: message.id, result }));
     });
     const run = runtime.runTaskSessionTurn(options).then(() => null, (error) => error);
@@ -587,16 +605,16 @@ describe('GUI-approved long-lived Task Session lease', () => {
     expect(options.onLost).toHaveBeenCalledOnce();
   });
   it('disconnects if saved GUI permissions are not confirmed on idle release', async () => {
-    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc); const options = session();
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
     await runtime.runTaskSessionTurn(options);
     internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'completed' } });
-    rpc.mockResolvedValue({});
+    rpc.mockImplementation(async () => ({}));
     await expect(runtime.finishTaskSession(options.sessionId)).rejects.toThrow('not confirmed');
     expect(runtime.snapshot()).toMatchObject({ running: false, sandboxMode: 'read-only', taskPermissionsActive: false });
     await expect(runtime.action('send', { text: 'manual' })).rejects.toThrow('unavailable');
   });
   it('handles completion arriving before the turn/start response without losing the lease', async () => {
-    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc); const options = session();
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
     const implementation = rpc.getMockImplementation()!;
     rpc.mockImplementation(async (method, params) => {
       if (method === 'turn/start') {
@@ -611,7 +629,7 @@ describe('GUI-approved long-lived Task Session lease', () => {
   it('expires a busy lease and refuses further use', async () => {
     optIn(); vi.useFakeTimers();
     try {
-      const { runtime, rpc } = setup('read-only'); confirmed(rpc); const options = { ...session(), expiresAt: new Date(Date.now() + 1000).toISOString() };
+      const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = { ...session(), expiresAt: new Date(Date.now() + 1000).toISOString() };
       await runtime.runTaskSessionTurn(options); await vi.advanceTimersByTimeAsync(1001);
       expect(runtime.snapshot()).toMatchObject({ running: false, taskPermissionsActive: false, sandboxMode: 'read-only' });
       expect(options.onLost).toHaveBeenCalledOnce();
@@ -619,7 +637,7 @@ describe('GUI-approved long-lived Task Session lease', () => {
     } finally { vi.useRealTimers(); }
   });
   it('revokes on failed completion and on process termination', async () => {
-    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc); const options = session();
+    optIn(); const { runtime, internal, rpc } = setup('read-only'); confirmed(rpc, internal); const options = session();
     await runtime.runTaskSessionTurn(options);
     internal.handleNotification('turn/completed', { threadId: threadA, turn: { id: 'session-turn-1', status: 'failed' } });
     expect(runtime.snapshot().taskPermissionsActive).toBe(false); expect(options.onLost).toHaveBeenCalledOnce();
