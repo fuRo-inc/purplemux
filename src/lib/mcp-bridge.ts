@@ -17,6 +17,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { listBridgeHosts, listBridgeWorkspaces } from '@/lib/mcp-bridge-data';
 import { callMcpRuntime } from '@/lib/mcp-internal-client';
+import { taskSessionMcpTools } from '@/lib/mcp-task-sessions';
 
 const PORT_DEFAULT = 18223;
 // 16k-character Japanese prompts can exceed 64KiB after UTF-8 encoding.
@@ -177,7 +178,7 @@ const taskWriteTools = [
 }));
 const writesEnabled = (): boolean => process.env.PURPLEMUX_MCP_ALLOW_WRITES === '1';
 const allTools = () => [
-  ...tools, ...taskReadTools, ...(writesEnabled() ? taskWriteTools : []),
+  ...tools, ...taskReadTools, ...taskSessionMcpTools, ...(writesEnabled() ? taskWriteTools : []),
 ];
 
 const serializeJson = (value: unknown): string => JSON.stringify(value);
@@ -187,9 +188,9 @@ const rpcError = (id: RpcId, code: number, message: string, data?: unknown): Rpc
 });
 
 const serverInfo = { name: 'purplemux-readonly', version: '0.1.0' };
-const instructions = () => writesEnabled()
+const instructions = () => 'Task Session tools manage requests and approval records only. Approval requires the logged-in GUI and never changes execution permissions. ' + (writesEnabled()
   ? 'Purplemux development bridge. Before submitting work inspect list_codex_tabs, confirm the exact host/cwd and ask the user to approve the task. Tasks default to read-only; workspace writes require sandboxMode=workspace-write plus confirmWriteAccess=true. Never automatically accept Codex approval prompts. Poll taskId for completion.'
-  : 'Read-only development status bridge. Task submission, interruption and approvals are disabled until the NUC operator explicitly opts in. Host SSH connectivity may not have been checked.';
+  : 'Read-only development status bridge. Task submission, interruption and approvals are disabled until the NUC operator explicitly opts in. Host SSH connectivity may not have been checked.');
 
 export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string): Promise<RpcReply | null> => {
   const req = asObject(body);
@@ -243,6 +244,11 @@ export const dispatchMcpRequest = async (body: unknown, protocolVersion?: string
         const args = asObject(params.arguments);
         let data: unknown;
         switch (params.name) {
+          case 'propose_task_session':
+          case 'get_task_session':
+          case 'list_task_sessions':
+            data = await callMcpRuntime(params.name, args);
+            break;
           case 'list_hosts':
             data = await listBridgeHosts();
             break;

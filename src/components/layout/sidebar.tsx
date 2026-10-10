@@ -15,6 +15,7 @@ import AppLogo from '@/components/layout/app-logo';
 import ShortcutKey from '@/components/shortcut-key';
 import useShortcutHints from '@/hooks/use-shortcut-hints';
 import { useRouter } from 'next/router';
+import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
@@ -681,6 +682,7 @@ const Sidebar = () => {
                   </div>
                 );
               })}
+              <Link href="/task-sessions" title="Task Sessions — 承認記録のみ、実行権限は未連携" className="rounded px-1 text-xs text-muted-foreground hover:bg-sidebar-accent">Tasks</Link>
               <div className="relative">
                 <button
                   className="flex h-7 w-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-sidebar-accent"
